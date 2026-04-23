@@ -1,0 +1,2075 @@
+I'm trying to patch a known issue in where running macOS Mojave on a 2018 Mac mini after newer versions of macOS may have modified the firmware cause Mojave's "Require password [duration dropdown] after sleep or screen saver begins" checkbox and dropdown are ignored and the password is required immediately on sleep or screen saver. An additional side effect of this bug is that sometimes the screen locks without the UI reflecting it, so you see your usual apps & desktop, but hitting Esc instantly reveals the hidden lock screen, or even simpler, you can just blindly enter your password and unlock the screen without Esc.
+
+Restoring correct functionality in the delay timer would be ideal, but if that's impossible, I'd settle for just preventing screenlock entirely. The specific goal is to create a system (or user) LaunchAgent or LaunchDaemon that patches this in memory (yes, SIP is disabled) and avoids modifying the loginwindow.app binary.
+
+Here are the patches you've already suggested (each non-indented line is the start of your new suggestion):
+
+{0x2acc8, {0xC3}, 1, "setScreenIsLocked -> ret"},
+    {0x28dde, {0x90, 0x90}, 2, "raiseShieldWindow -> NOPs"}
+{0x2acc8, {0x48, 0x31, 0xD2, 0xC3}, 4, "Force setScreenIsLocked to FALSE"},
+
+    // Patch 2: Kill the 'lockScreenImmediate' call entirely
+    // Assembly: ret (1 byte: c3)
+    {0x62b97, {0xC3}, 1, "Kill lockScreenImmediate entry"},
+    
+    // Patch 3: NOP the Shield Window call we found earlier
+    {0x28dde, {0x90, 0x90}, 2, "Disable raiseShieldWindow call"}
+{0x2acc8, {0x48, 0x31, 0xF6, 0xC3}, 4, "Force setScreenIsLocked to FALSE"},
+
+    // 2. Kill the 'lockScreenImmediate' entry point
+    {0x62b97, {0xC3}, 1, "Kill lockScreenImmediate"},
+
+    // 3. NOP the 'raiseShieldWindow' call to prevent the UI from appearing
+    {0x28dde, {0x90, 0x90}, 2, "Disable raiseShieldWindow UI"}
+{0x2acc8, {0x48, 0x31, 0xF6, 0xC3}, 4, "Force setScreenIsLocked to FALSE"},
+    
+    // 2. Kill the standard immediate lock
+    {0x62b97, {0xC3}, 1, "Kill lockScreenImmediate"},
+    
+    // 3. Kill the Short Timeout lock (Check Hopper for this offset!)
+    // Assuming it's near 0x62ba6 based on your earlier dump
+    {0x62ba6, {0xC3}, 1, "Kill ShortTimeout lock"},
+
+    // 4. Disable the UI Shield
+    {0x28dde, {0x90, 0x90}, 2, "Disable raiseShieldWindow UI"}
+{0x2acc8, {0x48, 0x31, 0xF6, 0xC3}, 4, "Force setScreenIsLocked to FALSE"},
+    
+    // 2. Kill the standard immediate lock
+    {0x62b97, {0xC3}, 1, "Kill lockScreenImmediate"},
+    
+    // 3. Kill the Short Timeout lock (REPLACE 0xXXXXX WITH HOPPER OFFSET)
+    {0xXXXXX, {0xC3}, 1, "Kill ShortTimeout lock"},
+
+    // 4. Disable the UI Shield
+    {0x28dde, {0x90, 0x90}, 2, "Disable raiseShieldWindow UI"}
+{0x2acc8, {0x48, 0x31, 0xF6, 0xC3}, 4, "Force setScreenIsLocked to FALSE"},
+    
+    // 2. Kill the "Immediate" wrapper
+    {0x62b97, {0xC3}, 1, "Kill lockScreenImmediate"},
+    
+    // 3. Kill the "Short Timeout" engine (The dump you just provided)
+    {0x62bab, {0xC3}, 1, "Kill ShortTimeout lock engine"},
+
+    // 4. Disable the UI Shield (Prevents the password window from drawing)
+    {0x28dde, {0x90, 0x90}, 2, "Disable raiseShieldWindow UI"}
+// 1. Force state to 0 (Verified)
+    {0x2acc8, {0x48, 0x31, 0xF6, 0xC3}, 4, "Force setScreenIsLocked to FALSE"},
+    
+    // 2. Kill the "Immediate" wrapper (Verified)
+    {0x62b97, {0xC3}, 1, "Kill lockScreenImmediate"},
+    
+    // 3. Kill the "Short Timeout" engine (Verified)
+    {0x62bab, {0xC3}, 1, "Kill ShortTimeout lock engine"},
+
+    // 4. Disable the UI Shield (Prevents the password window from drawing)
+    {0x28dde, {0x90, 0x90}, 2, "Disable raiseShieldWindow UI"},
+
+    // 5. THE NUCLEAR OPTION: NOP the SACLockScreenImmediate call
+    // Search Hopper for 'call SACLockScreenImmediate' inside startScreenLock
+    // Replace 0x28E61 with your actual offset
+    {0x28e61, {0x90, 0x90}, 2, "NOP SACLockScreenImmediate call"}
+// 1. Force the internal state (Your verified patch)
+    {0x2acc8, {0x48, 0x31, 0xF6, 0xC3}, 4, "Force setScreenIsLocked to FALSE"},
+    
+    // 2. Kill the ShortTimeout engine
+    {0x62bab, {0xC3}, 1, "Kill ShortTimeout lock engine"},
+
+    // 3. Disable the UI Shield
+    {0x28dde, {0x90, 0x90}, 2, "Disable raiseShieldWindow UI"},
+
+    // 4. Kill the Session Agent "Is Running" signal
+    // FIND THIS OFFSET IN HOPPER
+    {0x57f33, {0xC3}, 1, "Kill SACScreenSaverIsRunning"},
+
+    // 5. Kill the Session Agent "Lock Immediate" signal
+    // FIND THIS OFFSET IN HOPPER
+    {0x57f6e, {0xC3}, 1, "Kill SACLockScreenImmediate"}
+// 1. Force internal state to FALSE (Verified)
+    {0x2acc8, {0x48, 0x31, 0xF6, 0xC3}, 4, "Force setScreenIsLocked to FALSE"},
+    
+    // 2. Kill the "Short Timeout" engine (Verified)
+    {0x62bab, {0xC3}, 1, "Kill ShortTimeout lock engine"},
+
+    // 3. Disable the UI Shield (Verified)
+    {0x28dde, {0x90, 0x90}, 2, "Disable raiseShieldWindow UI"},
+
+    // 4. Kill the Session Agent "Is Running" signal (New)
+    {0x57f33, {0xC3}, 1, "Kill SACScreenSaverIsRunning"},
+
+    // 5. Kill the Session Agent "Lock Immediate" signal (New)
+    {0x57f6e, {0xC3}, 1, "Kill SACLockScreenImmediate"}
+// 1. Internal State (The "Ground Truth" patch)
+    {0x2acc8, {0x48, 0x31, 0xF6, 0xC3}, 4, "Force setScreenIsLocked to FALSE"},
+
+    // 2. SACLockScreenImmediate (The "Nuclear" patch)
+    // This kills the entire procedure you just pasted.
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "Kill SACLockScreenImmediate Procedure"},
+
+    // 3. SACScreenLockEnabled (The "Policy" patch)
+    // REPLACE 0xXXXXX with the actual offset of SACScreenLockEnabled
+    {0xXXXXX, {0x31, 0xC0, 0xC3}, 3, "Force SACScreenLockEnabled to FALSE"},
+
+    // 4. The ShortTimeout Engine (The "Timer" patch)
+    {0x62bab, {0xC3}, 1, "Kill ShortTimeout lock engine"},
+
+    // 5. The UI Shield (The "Visual" patch)
+    {0x28dde, {0x90, 0x90}, 2, "Disable raiseShieldWindow UI"}
+// 1. Internal State (The "Ground Truth" patch)
+    {0x2acc8, {0x48, 0x31, 0xF6, 0xC3}, 4, "Force setScreenIsLocked to FALSE"},
+
+    // 2. SACLockScreenImmediate (The "Nuclear" patch)
+    // This kills the entire procedure from your disassembly
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "Kill SACLockScreenImmediate Procedure"},
+
+    // 3. SACScreenLockEnabled (The "Policy" gate)
+    // This tells the screensaver "Locking is not allowed"
+    {0x85970, {0x31, 0xC0, 0xC3}, 3, "Force SACScreenLockEnabled to FALSE"},
+
+    // 4. The ShortTimeout Engine (The "Timer" patch)
+    {0x62bab, {0xC3}, 1, "Kill ShortTimeout lock engine"},
+
+    // 5. The UI Shield (The "Visual" patch)
+    {0x28dde, {0x90, 0x90}, 2, "Disable raiseShieldWindow UI"}
+// 1. Kill the Request Queue
+    {0xOFFSET_FOR_enqueueLockScreenRequestedBy, {0xC3}, 1, "Kill Lock Queue"},
+
+    // 2. Kill the Start Lock Logic
+    {0xOFFSET_FOR_startScreenLock, {0xC3}, 1, "Kill StartScreenLock"},
+
+    // 3. Force UI check to FALSE
+    // If the method is: xor eax, eax; mov al, 1; ret
+    // We change it to: xor eax, eax; ret
+    {0xOFFSET_FOR_readUseDefaultScreenLockUI, {0x31, 0xC0, 0xC3}, 3, "Disable Lock UI Policy"}
+// 1. The "Silver Bullet": Force the 'isLocked' Getter to always return 0 (False)
+    // Instead of patching the setter, we patch the getter so the system thinks it's unlocked.
+    {0x2acb0, {0x31, 0xC0, 0xC3}, 3, "Force isScreenLocked GETTER to False"},
+
+    // 2. Disable the 'Transition to Locked' Block Invoke
+    // This stops the internal block that actually flips the bit at [rax+0x28]
+    {0x62840, {0xC3}, 1, "Kill setScreenIsLocked_block_invoke"},
+
+    // 3. Prevent ScreenSaver from requesting a lock via the SessionAgent
+    // This targets the specific Mach message path from PID 639
+    {0x85a20, {0x31, 0xC0, 0xC3}, 3, "Neutralize SACLockScreenImmediate"},
+
+    // 4. The UI Shield (Crucial for the 'Invisible Lock' bug)
+    // NOP out the call to display the lock UI entirely
+// 1. Neutralize the 'isLocked' SETTER specifically
+    // Instead of killing the whole method, we just NOP the bit-flip.
+    // Look for the offset where it actually writes to +0x28. 
+    // Based on Mojave 10.14.6, this is often around 0x2acc4
+    {0x2acc4, {0x90, 0x90, 0x90, 0x90}, 4, "NOP the lock-bit assignment"},
+
+    // 2. The 'atLoginwindow' Bypass
+    // This makes the system always think it's already at the login screen 
+    // for the purpose of the lock-gate, triggering the 'no-op' path you saw 
+    // in the disassembly.
+    {0x6212b, {0xEB, 0x63}, 2, "Force Jump to loc_100062190 (No-op path)"},
+
+    // 3. Keep the UI Shield Patch
+    // This is safe and prevents the screen from going black/blank
+    {0x28dde, {0x90, 0x90}, 2, "Disable raiseShieldWindow UI"}
+// 1. The "Silver Bullet": NOP the bit-flip inside setScreenIsLocked
+    // Instead of killing the whole method, we just stop the write to [rax+0x28].
+    // Based on your finding that [rax+0x28] is the flag.
+    {0x2acc4, {0x90, 0x90, 0x90, 0x90}, 4, "NOP the lock-bit assignment"},
+
+    // 2. The Gatekeeper: Force the 'isLocked' Getter to always return 0
+    // This ensures any other part of the OS asking "is it locked?" gets a "No."
+    {0x2acb0, {0x31, 0xC0, 0xC3}, 3, "Force isScreenLocked GETTER to False"},
+
+    // 3. The UI Shield: Disable the black "Shield" window
+    // This prevents the screen from going blank even if a lock request is sent.
+    {0x28dde, {0x90, 0x90}, 2, "Disable raiseShieldWindow UI"}
+// 1. Force the Getter to always return FALSE (0)
+    // This tells the rest of macOS "The screen is NOT locked"
+    {0xYOUR_isScreenLocked_OFFSET, {0x31, 0xC0, 0xC3}, 3, "isScreenLocked -> return 0"},
+
+    // 2. Neutralize the Setter
+    // This stops the internal state from ever changing to 1
+    {0xYOUR_setScreenIsLocked_OFFSET, {0xC3}, 1, "setScreenIsLocked -> ret immediately"}
+// Force the GETTER to always return 0 (unlocked)
+    // 31 C0 = xor eax, eax (sets return value to 0)
+    // C3 = ret
+    { 0xYOUR_NEW_OFFSET, {0x31, 0xC0, 0xC3}, 3, "Kill isScreenLocked Getter" }
+// This kills the internal block that actually sets the bit to 1
+    { 0xYOUR_CALCULATED_OFFSET, {0xC3}, 1, "Kill setScreenIsLocked Block Invoke" },
+    
+    // Also, let's hit the 'raiseShieldWindow' UI to stop the black screen
+    { 0x28dde, {0x90, 0x90}, 2, "Disable raiseShieldWindow UI" }
+{ 0xCALCULATED_OFFSET, {0xC3}, 1, "Kill setScreenIsLocked Block Invoke" }
+{0x2acc8, {0x48, 0x31, 0xF6, 0xC3}, 4, "STATE: Force setScreenIsLocked to FALSE"},
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "ACTION: Kill SACLockScreenImmediate"},
+    {0x85970, {0x31, 0xC0, 0xC3}, 3, "POLICY: Force SACScreenLockEnabled to FALSE"},
+    {0x62bab, {0xC3}, 1, "TIMER: Kill ShortTimeout engine"},
+    {0x28dde, {0x90, 0x90}, 2, "VISUAL: NOP raiseShieldWindow"}
+// Offset 0x2acc8: -[LWScreenLock setScreenIsLocked:]
+    // We kill the setter so the 'locked' boolean never flips to true.
+    {0x2acc8, {0xC3}, 1, "STATE: Kill setScreenIsLocked"},
+
+    // Offset 0x859fe: -[SessionAgentCom SACLockScreenImmediate:]
+    // This is the primary XPC entry point for screen lock requests.
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "ACTION: Kill SACLockScreenImmediate"},
+
+    // Offset 0x85cd8: The specific call to lockScreenImmediateWithFadeToLockUI
+    // Even if the function above is bypassed, this kills the actual UI fade.
+    {0x85cd8, {0x90, 0x90, 0x90, 0x90, 0x90}, 5, "VISUAL: Kill FadeToLockUI Call"}
+// 1. Kill the internal state setter (Offset 0x2acc8)
+    {0x2acc8, {0xC3}, 1, "STATE: Kill setScreenIsLocked"},
+
+    // 2. Kill the main XPC entry point (Offset 0x859fe)
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "ACTION: Kill SACLockScreenImmediate"},
+
+    // 3. Kill the Short Timeout Engine Call (Offset 0x85d35)
+    // In your disassembly: 0000000100085d35 call r13
+    // We replace the 3-byte 'call r13' with NOPs
+    {0x85d35, {0x90, 0x90, 0x90}, 3, "TIMER: Kill ShortTimeout Call"},
+
+    // 4. Kill the Fade-to-Lock UI Call (Offset 0x85cd8)
+    // In your disassembly: 0000000100085cd8 call r13
+    {0x85cd8, {0x90, 0x90, 0x90}, 3, "VISUAL: Kill FadeToLockUI Call"}
+// 1. Existing State Kill
+    {0x2acc8, {0xC3}, 1, "STATE: Kill setScreenIsLocked"},
+
+    // 2. Kill the "Saver Did Fade" logic (This is often the trigger for the Shield)
+    // You'll need the offset from 'nm | grep screenSaverDidFade'
+    {0xOFFSET_HERE, {0xC3}, 1, "EVENT: Kill screenSaverDidFade"},
+
+    // 3. Kill the "Can Enter Power" gate
+    // You'll need the offset from 'nm | grep canEnterPowerWasCalled'
+    {0xOFFSET_HERE, {0x31, 0xC0, 0xC3}, 3, "POWER: Force canEnterPower to FALSE"},
+
+    // 4. Force the getter to always say 'Unlocked'
+    // Look for 'isScreenLocked' (not setScreenIsLocked)
+    {0xOFFSET_HERE, {0x31, 0xC0, 0xC3}, 3, "STATE: Force isScreenLocked to FALSE"}
+// Force the "Is Locked" check to always say NO (Offset from nm)
+    {0xOFFSET, {0x31, 0xC0, 0xC3}, 3, "STATE: Force isScreenLocked to FALSE"},
+    
+    // Kill the actual command to show the Shield UI (Offset from nm)
+    {0xOFFSET, {0xC3}, 1, "VISUAL: Kill showLockShield"},
+    
+    // Kill the Screen Saver termination handler (Offset from nm)
+    {0xOFFSET, {0xC3}, 1, "EVENT: Kill screenSaverDidFade"}
+// 1. The "Kill-Switch" for the Controller Activation
+    // Target: The 'call' instruction that invokes [LUI2ScreenLockController activate]
+    {0xOFFSET_FROM_HOPPER, {0x90, 0x90, 0x90, 0x90, 0x90}, 5, "UI: NOP LUI2 activate"},
+
+    // 2. The Authentication Manager State
+    // Target: Where it calls [LUIAuthenticationManager setLocked:YES]
+    {0xOFFSET_FROM_HOPPER, {0x31, 0xD2, 0x90}, 3, "AUTH: Force setLocked to FALSE"}
+// 1. Kill the 'setScreenIsLocked' setter (Offset 0x2acc8)
+    // You already have this one, but it's essential for state.
+    {0x2acc8, {0xC3}, 1, "STATE: Kill setScreenIsLocked"},
+
+    // 2. Kill the 'SACLockScreenImmediate' (Offset 0x859fe)
+    // This stops manual 'Lock Screen' menu items/shortcuts.
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "ACTION: Kill SACLockScreenImmediate"},
+
+    // 3. The "Saver-to-Shield" bridge
+    // If you found 'screenSaverDidFade' in Hopper, use its offset here.
+    // Assuming Mojave standard offset for now, but verify it!
+    {0x4a560, {0xC3}, 1, "EVENT: Kill screenSaverDidFade"},
+
+    // 4. Force LUI2 Authentication Manager to stay 'Unlocked'
+    // We are looking for where 'setLocked:' is called with '1' (true).
+    // This is a common Mojave offset for the LUI2 transition.
+    {0x85cd8, {0x31, 0xD2, 0x90, 0x90, 0x90}, 5, "AUTH: Force LUI2 Unlocked"}
+// 1. Kill the internal state setter (Keep this for safety)
+    {0x2acc8, {0xC3}, 1, "STATE: Kill setScreenIsLocked"},
+
+    // 2. Kill the primary XPC entry point
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "ACTION: Kill SACLockScreenImmediate"},
+
+    // 3. NEW: Kill the Daemon's UI Trigger (Offset 0x6d208)
+    // In your disassembly: 000000010006d208 call qword [_objc_msgSend_1000ef540]
+    // This is a 6-byte instruction in Mach-O for a qword call.
+    {0x6d208, {0x90, 0x90, 0x90, 0x90, 0x90, 0x90}, 6, "UI: Kill Daemon screenSaverDidFade"},
+
+    // 4. NEW: Kill the SessionAgent handoff (Offset 0x867d9)
+    // This stops the SessionAgent from even talking to the Daemon about the fade.
+    {0x867d9, {0x90, 0x90, 0x90, 0x90, 0x90}, 5, "XPC: Kill SAC to Daemon Handoff"}
+// 1. Kill the XPC entry point (Return 0/False immediately)
+    // 0x31, 0xC0 = xor eax, eax (Return 0)
+    // 0xC3 = ret
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "XPC: Return False on Lock Request"},
+
+    // 2. The SAC Fade Entry Point (Offset 0x8670f)
+    // Instead of NOPing the middle, we kill the WHOLE function at the start.
+    // This prevents the "limbo" state where it grabs the mouse.
+    {0x8670f, {0xC3}, 1, "XPC: Kill SAC ScreenSaver Fade Entry"},
+
+    // 3. The Daemon Fade Entry Point (Offset 0x6d04b)
+    // Kill the daemon's reaction to the fade immediately.
+    {0x6d04b, {0xC3}, 1, "UI: Kill Daemon Fade Entry"},
+
+    // 4. Force 'isScreenLocked' to always be False (If you found this offset)
+    // This is the "Safety Net" that keeps the mouse/keyboard active.
+    {0x2acc8, {0x31, 0xC0, 0xC3}, 3, "STATE: Force Unlocked State"}
+// 1. Force the Jump (Offset 0x6d1fc)
+    // In your code: 0x6d1fc jne loc_10006d20e (75 10)
+    // We change JNE (Jump if Not Equal) to JMP (Jump Always)
+    // Opcode: 0xEB 0x10 (Short Jump of 16 bytes to the exit)
+    {0x6d1fc, {0xEB, 0x10}, 2, "LOGIC: Force jump past screenSaverDidFade"},
+
+    // 2. Kill the primary entry (The one we know works without crashing)
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "XPC: Return False on Lock Request"}
+// 1. Force SACLockScreenImmediate to return 0 (False)
+    // Offset 0x859fe - You've used this, it's the standard entry point.
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "XPC: SACLockScreenImmediate -> False"},
+
+    // 2. Force the Global 'isLocked' state to False
+    // Offset 0x2acc8 - We want to make sure the getter always says "Not Locked"
+    {0x2acc8, {0x31, 0xC0, 0xC3}, 3, "STATE: isLocked -> False"},
+
+    // 3. The "Master Switch" (Find this offset in Hopper)
+    // Search for: -[LoginApp shouldLockScreen]
+    // If you find it, patch the first byte to return 0.
+    {0xREPLACE_ME, {0x31, 0xC0, 0xC3}, 3, "LOGIC: shouldLockScreen -> False"}
+// 1. Return 'False' for the primary Lock check
+    // Offset 0x859fe
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "XPC: SACLockScreenImmediate -> False"},
+
+    // 2. Return 'False' for the Screen Lock Controller's internal 'isLocked'
+    // This prevents the "Transition" state from hanging the keyboard.
+    // Search Hopper for: -[LUI2ScreenLockController isLocked]
+    {0xREPLACE_ME_LUI2, {0x31, 0xC0, 0xC3}, 3, "UI: Controller isLocked -> False"},
+
+    // 3. The "Master" Power Gate
+    // Search Hopper for: _SACCanLockScreen
+    {0xREPLACE_ME_CANLOCK, {0x31, 0xC0, 0xC3}, 3, "POWER: SACCanLockScreen -> False"}
+// 1. Kill SACLockScreenImmediate (The standard entry point)
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "XPC: SACLockScreenImmediate -> False"},
+
+    // 2. Kill the UI Pre-load (The one you just found)
+    // We want to return early from preLoad so the UI never initializes.
+    // Verify the start of -[LWDefaultScreenLockUI preLoad] in Hopper.
+    // If it starts at, say, 0x12345, put that here.
+    {0xOFFSET_OF_PRELOAD, {0xC3}, 1, "UI: Kill LWDefaultScreenLockUI preLoad"},
+
+    // 3. Force the 'canLock' logic to say NO
+    // Search Hopper for: -[LWDefaultScreenLockUI canLock]
+    {0xOFFSET_OF_CANLOCK, {0x31, 0xC0, 0xC3}, 3, "UI: LWDefaultScreenLockUI canLock -> False"}
+// Standard XPC Kill
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "XPC: SACLockScreenImmediate -> False"},
+
+    // REPLACE '0xABCDE' with the offset from Hopper for: -[LWDefaultScreenLockUI preLoad]
+    {0xABCDE, {0xC3}, 1, "UI: Kill LWDefaultScreenLockUI preLoad"},
+
+    // REPLACE '0xFGHIJ' with the offset from Hopper for: -[LWDefaultScreenLockUI canLock]
+    {0xFGHIJ, {0x31, 0xC0, 0xC3}, 3, "UI: LWDefaultScreenLockUI canLock -> False"}
+{0x859fe, {0x31, 0xC0, 0xC3}, 3, "XPC: SACLockScreenImmediate -> False"},
+    
+    // Replace 0xABCDE with the actual offset for preLoad
+    {0xABCDE, {0xC3}, 1, "UI: Kill LWDefaultScreenLockUI preLoad"},
+    
+    // Replace 0xFGHIJ with the actual offset for canLock
+    {0xFGHIJ, {0x31, 0xC0, 0xC3}, 3, "UI: LWDefaultScreenLockUI canLock -> False"}
+{0x859fe, {0x31, 0xC0, 0xC3}, 3, "XPC: SACLockScreenImmediate -> False"},
+    
+    // Replace these two with the real hex offsets from Hopper:
+    {0x12345, {0xC3}, 1, "UI: Kill LWDefaultScreenLockUI preLoad"},
+    {0x6789A, {0x31, 0xC0, 0xC3}, 3, "UI: LWDefaultScreenLockUI canLock -> False"}
+// 1. The XPC Trap (We know this one is safe)
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "XPC: SACLockScreenImmediate -> False"},
+
+    // 2. The Gatekeeper (Prevents mouse/keyboard capture)
+    {0xYOUR_CANLOCK_OFFSET, {0x31, 0xC0, 0xC3}, 3, "UI: canLock -> False"},
+
+    // 3. The Engine Kill (Prevents the UI hang)
+    {0xYOUR_PRELOAD_OFFSET, {0xC3}, 1, "UI: preLoad -> RET"}
+// 1. Existing XPC Trap (Keep this)
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "XPC: SACLockScreenImmediate -> False"},
+
+    // 2. The LUI2 Controller State (Search for this offset)
+    // Goal: Force -[LUI2ScreenLockController isLocked] to return False
+    {0xYOUR_LUI2_ISLOCKED_OFFSET, {0x31, 0xC0, 0xC3}, 3, "UI: LUI2 isLocked -> False"},
+
+    // 3. The Auth Manager State (Search for this offset)
+    // Goal: Force -[LUIAuthenticationManager isLocked] to return False
+    {0xYOUR_AUTH_ISLOCKED_OFFSET, {0x31, 0xC0, 0xC3}, 3, "AUTH: Manager isLocked -> False"},
+
+    // 4. The Global Session State (Search for this offset)
+    // Goal: Force _SACIsScreenLocked to return False
+    {0xYOUR_SACISLOCKED_OFFSET, {0x31, 0xC0, 0xC3}, 3, "STATE: Global isLocked -> False"}
+// 1. The XPC Trap (Keep this)
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "XPC: SACLockScreenImmediate -> False"},
+
+    // 2. The Logic Killer: Force setScreenIsLocked to always set 0
+    // In Hopper, find the start of -[LWScreenLock setScreenIsLocked:]
+    // We will replace the start of the function with:
+    // xor rsi, rsi  (Force the 'locked' argument to 0)
+    // jmp <offset to the internal setter>
+    // OR simply:
+    {0x2acc8, {0xC3}, 1, "STATE: Kill setScreenIsLocked entirely"},
+
+    // 3. The "Is it Locked?" Lie
+    // If anything asks if we are locked, we say NO.
+    // Search Hopper for: -[LWScreenLock isScreenLocked]
+    {0x2abd1, {0x31, 0xC0, 0xC3}, 3, "STATE: isScreenLocked -> ALWAYS FALSE"}
+// 1. The XPC Trap (Standard)
+    {0x859fe, {0x31, 0xC0, 0xC3}, 3, "XPC: SACLockScreenImmediate -> False"},
+
+    // 2. FORCE setScreenIsLocked to always write 0
+    // We replace the start of the function with:
+    // mov rsi, 0   (48 c7 c6 00 00 00 00)
+    // jmp <offset to the actual store instruction at 0x2acd3>
+    // Or simpler: just return immediately and hope the default is 0.
+    {0x2acc8, {0xC3}, 1, "SETTER: Kill setScreenIsLocked"},
+
+    // 3. The Getter: If anything asks "Is the screen locked?", say NO.
+    // This is 0x2abd1 based on your notes.
+    // xor eax, eax; ret
+    {0x2abd1, {0x31, 0xC0, 0xC3}, 3, "GETTER: isScreenLocked -> False"}
+
+Console.app log while triggering the Screen Saver:
+
+default	14:36:40.293148 -0700	loginwindow	-[ScreenSaverDaemon _screenSaverStart:skipEarlyMouseCheck:overrideToBlackScreen:] | Using ScreenSaver path: /System/Library/CoreServices/ScreenSaverEngine.app
+default	14:36:40.304092 -0700	loginwindow	-[ApplicationManager checkInAppContext:refCon:eventData:] |      checked in app : ScreenSaverEngine
+default	14:36:40.314697 -0700	loginwindow	-[SessionAgentCom SACScreenSaverIsRunning:] | Enter,   sent by pid: 639, name: ScreenSaverEngine
+default	14:36:40.325195 -0700	loginwindow	-[ApplicationManager checkInAppContext:refCon:eventData:] |      checked in app : ScreenSaverEngine
+default	14:36:40.419682 -0700	loginwindow	-[SessionAgentCom SACScreenSaverDidFadeInBackground:psnHi:psnLow:reply:] | Enter,   sent by pid: 639, name: ScreenSaverEngine
+error	14:36:40.520214 -0700	launchservicesd	Application App:"loginwindow" asn:0x0-2002 pid:90 refs=8 @ 0x7f9b441075f0 tried to be brought forward, but isn't in fPermittedFrontApps ( ( "LSApplication:0x0-0x2d02d pid=639 "ScreenSaverEngine"")), so denying.
+default	14:36:40.532925 -0700	loginwindow	-[ApplicationManager checkInAppContext:refCon:eventData:] |      checked in app : iLife Slideshows (ScreenSaverEngine)
+default	14:36:41.535836 -0700	loginwindow	-[SessionAgentCom SACScreenSaverStopNow:] | Enter,   sent by pid: 639, name: ScreenSaverEngine
+default	14:36:43.967229 -0700	loginwindow	-[PersistentAppsSupport applicationQuit:] | for app:ScreenSaverEngine, _appTrackingState = 2
+default	14:36:43.989749 -0700	loginwindow	-[PersistentAppsSupport applicationQuit:] | for app:iLife Slideshows (ScreenSaverEngine), _appTrackingState = 2
+
+With a "screenIsLocked" filter:
+default	14:36:40.533293 -0700	loginwindow	-[LWScreenLock setScreenIsLocked:]_block_invoke | enter, setting to 1
+default	14:36:40.538745 -0700	loginwindow	-[SessionAgentNotificationCenter setNotifySharedSpace:key:toValue:] | setNotifySharedSpace: com.apple.sessionagent.screenIsLocked, to value:1 using token:71
+default	14:36:40.538899 -0700	loginwindow	-[SessionAgentNotificationCenter doSpecialNotificationHandling:] | Activated SANC_ScreenIsLocked AHPs
+default	14:36:40.539031 -0700	loginwindow	-[SessionAgentNotificationCenter sendDistributedNotification:forUserID:] | sendDistributedNotification: com.apple.screenIsLocked, with userID:502
+default	14:36:40.539195 -0700	loginwindow	-[SessionAgentNotificationCenter sendBSDNotification:forUserID:] | sendBSDNotification: com.apple.sessionagent.screenIsLocked, with userID:502
+default	14:36:43.940652 -0700	loginwindow	-[LWScreenLock setScreenIsLocked:]_block_invoke | enter, setting to 0
+default	14:36:43.942004 -0700	loginwindow	-[SessionAgentNotificationCenter setNotifySharedSpace:key:toValue:] | setNotifySharedSpace: com.apple.sessionagent.screenIsLocked, to value:0 using token:71
+default	14:39:54.957520 -0700	distnoted	register name: com.apple.screenIsLocked object: kCFNotificationAnyObject token: f427e pid: 658
+default	14:39:54.964004 -0700	distnoted	register name: com.apple.screenIsLocked object: kCFNotificationAnyObject token: f4282 pid: 658
+
+Disassembled from Hopper:
+        ; ================ B E G I N N I N G   O F   P R O C E D U R E ================
+
+        ; Variables:
+        ;    var_28: int64_t, -40
+        ;    var_40: int8_t, -64
+
+
+                     -[SessionAgentCom SACScreenLockEnabled:]:
+0000000100085d45         push       rbp                                         ; Objective C Implementation defined at 0x100108548 (instance method), DATA XREF=0x100108548
+0000000100085d46         mov        rbp, rsp
+0000000100085d49         push       r15
+0000000100085d4b         push       r14
+0000000100085d4d         push       r12
+0000000100085d4f         push       rbx
+0000000100085d50         sub        rsp, 0x20
+0000000100085d54         mov        r14, rdx
+0000000100085d57         mov        r15, rdi
+0000000100085d5a         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0
+0000000100085d61         mov        rax, qword [rax]
+0000000100085d64         mov        qword [rbp+var_28], rax
+0000000100085d68         lea        r12, qword [qword_100113d08+8]              ; 0x100113d10
+0000000100085d6f         mov        rdi, qword [r12]                            ; argument #1 for method sub_100056b7e
+0000000100085d73         call       sub_100056b7e                               ; sub_100056b7e
+0000000100085d78         mov        rbx, rax
+0000000100085d7b         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100085d7d         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100085d80         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100085d85         test       al, al
+0000000100085d87         je         loc_100085dd8
+
+0000000100085d89         mov        rsi, qword [0x100110278]                    ; @selector(debugLogConnectionInfo)
+0000000100085d90         mov        rdi, r15
+0000000100085d93         call       qword [_objc_msgSend_1000ef540]             ; _objc_msgSend, _objc_msgSend_1000ef540
+0000000100085d99         lea        r8, qword [rbp+var_40]
+0000000100085d9d         mov        dword [r8], 0x8200202
+0000000100085da4         lea        rcx, qword [aSessionagentco_1000e7aec]      ; "-[SessionAgentCom SACScreenLockEnabled:]"
+0000000100085dab         mov        qword [r8+4], rcx
+0000000100085daf         mov        word [r8+0xc], 0x840
+0000000100085db6         mov        qword [r8+0xe], rax                         ; argument "buf" for method imp___stubs___os_log_impl
+0000000100085dba         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100085dc1         lea        rcx, qword [aSEnter_1000d44d0]              ; argument "format" for method imp___stubs___os_log_impl, "%s | Enter, %@"
+0000000100085dc8         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100085dca         mov        r9d, 0x16                                   ; argument "size" for method imp___stubs___os_log_impl
+0000000100085dd0         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100085dd3         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100085dd8:
+0000000100085dd8         mov        rdi, qword [objc_cls_ref_LWScreenLock]      ; objc_cls_ref_LWScreenLock, CODE XREF=-[SessionAgentCom SACScreenLockEnabled:]+66
+0000000100085ddf         mov        rsi, qword [0x10010d850]                    ; @selector(sharedScreenLock)
+0000000100085de6         mov        rbx, qword [_objc_msgSend_1000ef540]        ; _objc_msgSend_1000ef540
+0000000100085ded         call       rbx
+0000000100085def         mov        rsi, qword [0x10010fa40]                    ; @selector(screenLockDefaultDelay)
+0000000100085df6         mov        rdi, rax
+0000000100085df9         call       rbx
+0000000100085dfb         mov        r15b, 0x1
+0000000100085dfe         cmp        eax, 0x7fffffff
+0000000100085e03         jne        loc_100085e59
+
+0000000100085e05         mov        rdi, qword [r12]                            ; argument #1 for method sub_100056b7e
+0000000100085e09         call       sub_100056b7e                               ; sub_100056b7e
+0000000100085e0e         mov        rbx, rax
+0000000100085e11         xor        r15d, r15d
+0000000100085e14         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100085e16         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100085e19         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100085e1e         test       al, al
+0000000100085e20         je         loc_100085e59
+
+0000000100085e22         lea        r8, qword [rbp+var_40]
+0000000100085e26         mov        dword [r8], 0x8200102
+0000000100085e2d         lea        rax, qword [aSessionagentco_1000e7aec]      ; "-[SessionAgentCom SACScreenLockEnabled:]"
+0000000100085e34         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100085e38         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100085e3f         lea        rcx, qword [aSLockOnButIntm]                ; argument "format" for method imp___stubs___os_log_impl, "%s |    Lock on, but int_max, setting to NO"
+0000000100085e46         xor        r15d, r15d
+0000000100085e49         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100085e4b         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100085e51         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100085e54         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100085e59:
+0000000100085e59         mov        rdi, qword [r12]                            ; argument #1 for method sub_100056b7e, CODE XREF=-[SessionAgentCom SACScreenLockEnabled:]+190, -[SessionAgentCom SACScreenLockEnabled:]+219
+0000000100085e5d         call       sub_100056b7e                               ; sub_100056b7e
+0000000100085e62         mov        rbx, rax
+0000000100085e65         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100085e67         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100085e6a         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100085e6f         test       al, al
+0000000100085e71         je         loc_100085eb6
+
+0000000100085e73         movzx      eax, r15b
+0000000100085e77         lea        r8, qword [rbp+var_40]
+0000000100085e7b         mov        dword [r8], 0x8200202
+0000000100085e82         lea        rcx, qword [aSessionagentco_1000e7aec]      ; "-[SessionAgentCom SACScreenLockEnabled:]"
+0000000100085e89         mov        qword [r8+4], rcx
+0000000100085e8d         mov        word [r8+0xc], 0x400
+0000000100085e94         mov        dword [r8+0xe], eax                         ; argument "buf" for method imp___stubs___os_log_impl
+0000000100085e98         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100085e9f         lea        rcx, qword [aSReturningd_1000d0940]         ; argument "format" for method imp___stubs___os_log_impl, "%s | returning:%d"
+0000000100085ea6         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100085ea8         mov        r9d, 0x12                                   ; argument "size" for method imp___stubs___os_log_impl
+0000000100085eae         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100085eb1         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100085eb6:
+0000000100085eb6         movzx      edx, r15b                                   ; CODE XREF=-[SessionAgentCom SACScreenLockEnabled:]+300
+0000000100085eba         xor        esi, esi
+0000000100085ebc         mov        rdi, r14
+0000000100085ebf         call       qword [r14+0x10]
+0000000100085ec3         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0
+0000000100085eca         mov        rax, qword [rax]
+0000000100085ecd         cmp        rax, qword [rbp+var_28]
+0000000100085ed1         jne        loc_100085ee0
+
+0000000100085ed3         add        rsp, 0x20
+0000000100085ed7         pop        rbx
+0000000100085ed8         pop        r12
+0000000100085eda         pop        r14
+0000000100085edc         pop        r15
+0000000100085ede         pop        rbp
+0000000100085edf         ret
+                        ; endp
+
+                     loc_100085ee0:
+0000000100085ee0         call       imp___stubs____stack_chk_fail               ; __stack_chk_fail, CODE XREF=-[SessionAgentCom SACScreenLockEnabled:]+396
+                        ; endp
+
+
+        ; ================ B E G I N N I N G   O F   P R O C E D U R E ================
+
+        ; Variables:
+        ;    var_30: int64_t, -48
+        ;    var_50: int8_t, -80
+
+
+                     -[SessionAgentCom SACLockScreenImmediate:]:
+00000001000859fe         push       rbp                                         ; Objective C Implementation defined at 0x100108530 (instance method), DATA XREF=0x100108530
+00000001000859ff         mov        rbp, rsp
+0000000100085a02         push       r15
+0000000100085a04         push       r14
+0000000100085a06         push       r13
+0000000100085a08         push       r12
+0000000100085a0a         push       rbx
+0000000100085a0b         sub        rsp, 0x28
+0000000100085a0f         mov        r14, rdx
+0000000100085a12         mov        r15, rdi
+0000000100085a15         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0
+0000000100085a1c         mov        rax, qword [rax]
+0000000100085a1f         mov        qword [rbp+var_30], rax
+0000000100085a23         lea        r12, qword [qword_100113d08+8]              ; 0x100113d10
+0000000100085a2a         mov        rdi, qword [r12]                            ; argument #1 for method sub_100056b7e
+0000000100085a2e         call       sub_100056b7e                               ; sub_100056b7e
+0000000100085a33         mov        rbx, rax
+0000000100085a36         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100085a38         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100085a3b         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100085a40         test       al, al
+0000000100085a42         je         loc_100085a93
+
+0000000100085a44         mov        rsi, qword [0x100110278]                    ; @selector(debugLogConnectionInfo)
+0000000100085a4b         mov        rdi, r15
+0000000100085a4e         call       qword [_objc_msgSend_1000ef540]             ; _objc_msgSend, _objc_msgSend_1000ef540
+0000000100085a54         lea        r8, qword [rbp+var_50]
+0000000100085a58         mov        dword [r8], 0x8200202
+0000000100085a5f         lea        rcx, qword [aSessionagentco_1000e7aa8]      ; "-[SessionAgentCom SACLockScreenImmediate:]"
+0000000100085a66         mov        qword [r8+4], rcx
+0000000100085a6a         mov        word [r8+0xc], 0x840
+0000000100085a71         mov        qword [r8+0xe], rax                         ; argument "buf" for method imp___stubs___os_log_impl
+0000000100085a75         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100085a7c         lea        rcx, qword [aSEnter_1000d44d0]              ; argument "format" for method imp___stubs___os_log_impl, "%s | Enter, %@"
+0000000100085a83         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100085a85         mov        r9d, 0x16                                   ; argument "size" for method imp___stubs___os_log_impl
+0000000100085a8b         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100085a8e         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100085a93:
+0000000100085a93         call       sub_100045bc7                               ; sub_100045bc7, CODE XREF=-[SessionAgentCom SACLockScreenImmediate:]+68
+0000000100085a98         test       al, al
+0000000100085a9a         je         loc_100085b21
+
+0000000100085aa0         mov        rdi, qword [r12]                            ; argument #1 for method sub_100056b7e
+0000000100085aa4         call       sub_100056b7e                               ; sub_100056b7e
+0000000100085aa9         mov        rbx, rax
+0000000100085aac         xor        r15d, r15d
+0000000100085aaf         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100085ab1         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100085ab4         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100085ab9         test       al, al
+0000000100085abb         je         loc_100085af4
+
+0000000100085abd         lea        r8, qword [rbp+var_50]
+0000000100085ac1         mov        dword [r8], 0x8200102
+0000000100085ac8         lea        rax, qword [aSessionagentco_1000e7aa8]      ; "-[SessionAgentCom SACLockScreenImmediate:]"
+0000000100085acf         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100085ad3         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100085ada         lea        rcx, qword [aSDisplayIsCapt_1000d4460]      ; argument "format" for method imp___stubs___os_log_impl, "%s |      Display is captured, ignore screen lock request"
+0000000100085ae1         xor        r15d, r15d
+
+                     loc_100085ae4:
+0000000100085ae4         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl, CODE XREF=-[SessionAgentCom SACLockScreenImmediate:]+405, -[SessionAgentCom SACLockScreenImmediate:]+532
+0000000100085ae6         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100085aec         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100085aef         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100085af4:
+0000000100085af4         mov        rdi, r14                                    ; CODE XREF=-[SessionAgentCom SACLockScreenImmediate:]+189, -[SessionAgentCom SACLockScreenImmediate:]+367, -[SessionAgentCom SACLockScreenImmediate:]+490, -[SessionAgentCom SACLockScreenImmediate:]+829
+0000000100085af7         mov        esi, r15d
+0000000100085afa         call       qword [r14+0x10]
+0000000100085afe         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0
+0000000100085b05         mov        rax, qword [rax]
+0000000100085b08         cmp        rax, qword [rbp+var_30]
+0000000100085b0c         jne        loc_100085d40
+
+0000000100085b12         add        rsp, 0x28
+0000000100085b16         pop        rbx
+0000000100085b17         pop        r12
+0000000100085b19         pop        r13
+0000000100085b1b         pop        r14
+0000000100085b1d         pop        r15
+0000000100085b1f         pop        rbp
+0000000100085b20         ret
+                        ; endp
+
+                     loc_100085b21:
+0000000100085b21         lea        r15, qword [byte_100113bf0+168]             ; 0x100113c98, CODE XREF=-[SessionAgentCom SACLockScreenImmediate:]+156
+0000000100085b28         mov        rdi, qword [r15]                            ; argument "key" for method imp___stubs__CFPreferencesAppValueIsForced
+0000000100085b2b         lea        rbx, qword [byte_100113bf0+8]               ; 0x100113bf8
+0000000100085b32         mov        rsi, qword [rbx]                            ; argument "applicationID" for method imp___stubs__CFPreferencesAppValueIsForced
+0000000100085b35         call       imp___stubs__CFPreferencesAppValueIsForced  ; CFPreferencesAppValueIsForced
+0000000100085b3a         test       al, al
+0000000100085b3c         je         loc_100085b98
+
+0000000100085b3e         mov        rdi, qword [r15]                            ; argument "key" for method imp___stubs__CFPreferencesGetAppBooleanValue
+0000000100085b41         mov        rsi, qword [rbx]                            ; argument "applicationID" for method imp___stubs__CFPreferencesGetAppBooleanValue
+0000000100085b44         xor        edx, edx                                    ; argument "keyExistsAndHasValidFormat" for method imp___stubs__CFPreferencesGetAppBooleanValue
+0000000100085b46         call       imp___stubs__CFPreferencesGetAppBooleanValue ; CFPreferencesGetAppBooleanValue
+0000000100085b4b         test       al, al
+0000000100085b4d         je         loc_100085b98
+
+0000000100085b4f         mov        rdi, qword [r12]                            ; argument #1 for method sub_100056b7e
+0000000100085b53         call       sub_100056b7e                               ; sub_100056b7e
+0000000100085b58         mov        rbx, rax
+0000000100085b5b         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100085b5d         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100085b60         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100085b65         mov        r15d, 0x1
+0000000100085b6b         test       al, al
+0000000100085b6d         je         loc_100085af4
+
+0000000100085b6f         lea        r8, qword [rbp+var_50]
+0000000100085b73         mov        dword [r8], 0x8200102
+0000000100085b7a         lea        rax, qword [aSessionagentco_1000e7aa8]      ; "-[SessionAgentCom SACLockScreenImmediate:]"
+0000000100085b81         mov        qword [r8+4], rax
+0000000100085b85         lea        rdi, qword [__mh_execute_header]            ; __mh_execute_header
+0000000100085b8c         lea        rcx, qword [aSMcxSettingPre]                ; "%s |      MCX setting prevented screenlock"
+0000000100085b93         jmp        loc_100085ae4
+
+                     loc_100085b98:
+0000000100085b98         lea        rax, qword [qword_100114290]                ; qword_100114290, CODE XREF=-[SessionAgentCom SACLockScreenImmediate:]+318, -[SessionAgentCom SACLockScreenImmediate:]+335
+0000000100085b9f         mov        rdi, qword [rax]
+0000000100085ba2         mov        rsi, qword [0x10010e1b0]                    ; @selector(loginInstance)
+0000000100085ba9         mov        r13, qword [_objc_msgSend_1000ef540]        ; _objc_msgSend_1000ef540
+0000000100085bb0         call       r13
+0000000100085bb3         mov        rsi, qword [0x10010e598]                    ; @selector(isGuestAccount)
+0000000100085bba         mov        rdi, rax
+0000000100085bbd         call       r13
+0000000100085bc0         test       al, al
+0000000100085bc2         je         loc_100085c17
+
+0000000100085bc4         lea        rax, qword [qword_100113d08+16]             ; 0x100113d18
+0000000100085bcb         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+0000000100085bce         call       sub_100056b7e                               ; sub_100056b7e
+0000000100085bd3         mov        rbx, rax
+0000000100085bd6         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100085bd8         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100085bdb         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100085be0         mov        r15d, 0x1
+0000000100085be6         test       al, al
+0000000100085be8         je         loc_100085af4
+
+0000000100085bee         lea        r8, qword [rbp+var_50]
+0000000100085bf2         mov        dword [r8], 0x8200102
+0000000100085bf9         lea        rax, qword [aSessionagentco_1000e7aa8]      ; "-[SessionAgentCom SACLockScreenImmediate:]"
+0000000100085c00         mov        qword [r8+4], rax
+0000000100085c04         lea        rdi, qword [__mh_execute_header]            ; __mh_execute_header
+0000000100085c0b         lea        rcx, qword [aSErrorSaclocks]                ; "%s | ERROR | SACLockScreenImmediate: attempt to lock the screen on a guest account"
+0000000100085c12         jmp        loc_100085ae4
+
+                     loc_100085c17:
+0000000100085c17         mov        rdi, qword [objc_cls_ref_NSXPCConnection]   ; objc_cls_ref_NSXPCConnection, CODE XREF=-[SessionAgentCom SACLockScreenImmediate:]+452
+0000000100085c1e         mov        rsi, qword [0x100110250]                    ; @selector(currentConnection)
+0000000100085c25         call       r13
+0000000100085c28         mov        rsi, qword [0x100110258]                    ; @selector(processIdentifier)
+0000000100085c2f         mov        rdi, rax
+0000000100085c32         call       r13
+0000000100085c35         mov        rdi, qword [objc_cls_ref_NSRunningApplication] ; objc_cls_ref_NSRunningApplication
+0000000100085c3c         mov        rsi, qword [0x100110260]                    ; @selector(runningApplicationWithProcessIdentifier:)
+0000000100085c43         mov        edx, eax
+0000000100085c45         call       r13
+0000000100085c48         mov        rsi, qword [0x1001102b8]                    ; @selector(bundleIdentifier)
+0000000100085c4f         mov        rdi, rax
+0000000100085c52         call       r13
+0000000100085c55         mov        rsi, qword [0x10010d8b0]                    ; @selector(isEqualToString:)
+0000000100085c5c         lea        rdx, qword [cfstring_com_apple_SetupAssistant] ; @"com.apple.SetupAssistant"
+0000000100085c63         mov        rdi, rax
+0000000100085c66         call       r13
+0000000100085c69         mov        ebx, eax
+0000000100085c6b         mov        rdi, qword [r12]                            ; argument #1 for method sub_100056b7e
+0000000100085c6f         call       sub_100056b7e                               ; sub_100056b7e
+0000000100085c74         mov        r15, rax
+0000000100085c77         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100085c79         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100085c7c         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100085c81         test       bl, bl
+0000000100085c83         je         loc_100085cdd
+
+0000000100085c85         test       al, al
+0000000100085c87         je         loc_100085cbd
+
+0000000100085c89         lea        r8, qword [rbp+var_50]
+0000000100085c8d         mov        dword [r8], 0x8200102
+0000000100085c94         lea        rax, qword [aSessionagentco_1000e7aa8]      ; "-[SessionAgentCom SACLockScreenImmediate:]"
+0000000100085c9b         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100085c9f         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100085ca6         lea        rcx, qword [aSScreenlockCal]                ; argument "format" for method imp___stubs___os_log_impl, "%s |      Screenlock called from buddy, lock screen and show UI without guest or switch buttons"
+0000000100085cad         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100085caf         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100085cb5         mov        rsi, r15                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100085cb8         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100085cbd:
+0000000100085cbd         mov        rdi, qword [objc_cls_ref_LWScreenLock]      ; objc_cls_ref_LWScreenLock, CODE XREF=-[SessionAgentCom SACLockScreenImmediate:]+649
+0000000100085cc4         mov        rsi, qword [0x10010d850]                    ; @selector(sharedScreenLock)
+0000000100085ccb         call       r13
+0000000100085cce         mov        rsi, qword [0x10010e428]                    ; @selector(lockScreenImmediateWithFadeToLockUI)
+0000000100085cd5         mov        rdi, rax
+0000000100085cd8         call       r13
+0000000100085cdb         jmp        loc_100085d38
+
+                     loc_100085cdd:
+0000000100085cdd         test       al, al                                      ; CODE XREF=-[SessionAgentCom SACLockScreenImmediate:]+645
+0000000100085cdf         je         loc_100085d15
+
+0000000100085ce1         lea        r8, qword [rbp+var_50]
+0000000100085ce5         mov        dword [r8], 0x8200102
+0000000100085cec         lea        rax, qword [aSessionagentco_1000e7aa8]      ; "-[SessionAgentCom SACLockScreenImmediate:]"
+0000000100085cf3         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100085cf7         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100085cfe         lea        rcx, qword [aSDoingStandard]                ; argument "format" for method imp___stubs___os_log_impl, "%s |      Doing standard lockscreenimmediate"
+0000000100085d05         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100085d07         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100085d0d         mov        rsi, r15                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100085d10         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100085d15:
+0000000100085d15         mov        rdi, qword [objc_cls_ref_LWScreenLock]      ; objc_cls_ref_LWScreenLock, CODE XREF=-[SessionAgentCom SACLockScreenImmediate:]+737
+0000000100085d1c         mov        rsi, qword [0x10010d850]                    ; @selector(sharedScreenLock)
+0000000100085d23         call       r13
+0000000100085d26         mov        rsi, qword [0x10010f660]                    ; @selector(lockScreenImmediateUsingShortTimeout:)
+0000000100085d2d         mov        edx, 0x1
+0000000100085d32         mov        rdi, rax
+0000000100085d35         call       r13
+
+                     loc_100085d38:
+0000000100085d38         xor        r15d, r15d                                  ; CODE XREF=-[SessionAgentCom SACLockScreenImmediate:]+733
+0000000100085d3b         jmp        loc_100085af4
+
+                     loc_100085d40:
+
+
+        ; ================ B E G I N N I N G   O F   P R O C E D U R E ================
+
+        ; Variables:
+        ;    var_30: int64_t, -48
+        ;    var_40: int8_t, -64
+        ;    var_70: int8_t, -112
+
+
+                     -[LWScreenLock lockScreenImmediateUsingShortTimeout:]:
+0000000100062bab         push       rbp                                         ; Objective C Implementation defined at 0x1001029a8 (instance method), DATA XREF=0x1001029a8
+0000000100062bac         mov        rbp, rsp
+0000000100062baf         push       r15
+0000000100062bb1         push       r14
+0000000100062bb3         push       r13
+0000000100062bb5         push       r12
+0000000100062bb7         push       rbx
+0000000100062bb8         sub        rsp, 0x48
+0000000100062bbc         mov        r15d, edx
+0000000100062bbf         mov        r14, rdi
+0000000100062bc2         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0
+0000000100062bc9         mov        rax, qword [rax]
+0000000100062bcc         mov        qword [rbp+var_30], rax
+0000000100062bd0         lea        r13, qword [qword_100113d08+8]              ; 0x100113d10
+0000000100062bd7         mov        rdi, qword [r13]                            ; argument #1 for method sub_100056b7e
+0000000100062bdb         call       sub_100056b7e                               ; sub_100056b7e
+0000000100062be0         mov        rbx, rax
+0000000100062be3         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100062be5         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100062be8         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100062bed         test       al, al
+0000000100062bef         je         loc_100062c25
+
+0000000100062bf1         lea        r8, qword [rbp+var_40]
+0000000100062bf5         mov        dword [r8], 0x8200102
+0000000100062bfc         lea        rax, qword [aLwscreenlockLo]                ; "-[LWScreenLock lockScreenImmediateUsingShortTimeout:]"
+0000000100062c03         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100062c07         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100062c0e         lea        rcx, qword [aSEnter]                        ; argument "format" for method imp___stubs___os_log_impl, "%s | enter"
+0000000100062c15         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100062c17         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100062c1d         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100062c20         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100062c25:
+0000000100062c25         lea        rax, qword [qword_100114290]                ; qword_100114290, CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+68
+0000000100062c2c         mov        rdi, qword [rax]
+0000000100062c2f         mov        rsi, qword [0x10010e1b0]                    ; @selector(loginInstance)
+0000000100062c36         mov        rbx, qword [_objc_msgSend_1000ef540]        ; _objc_msgSend_1000ef540
+0000000100062c3d         call       rbx
+0000000100062c3f         mov        rsi, qword [0x10010e598]                    ; @selector(isGuestAccount)
+0000000100062c46         mov        rdi, rax
+0000000100062c49         call       rbx
+0000000100062c4b         test       al, al
+0000000100062c4d         je         loc_100062cac
+
+0000000100062c4f         lea        rax, qword [qword_100113d08+16]             ; 0x100113d18
+0000000100062c56         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+0000000100062c59         call       sub_100056b7e                               ; sub_100056b7e
+0000000100062c5e         mov        rbx, rax
+0000000100062c61         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100062c63         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100062c66         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100062c6b         test       al, al
+0000000100062c6d         je         loc_100062db7
+
+0000000100062c73         lea        r8, qword [rbp+var_40]
+0000000100062c77         mov        dword [r8], 0x8200102
+0000000100062c7e         lea        rax, qword [aLwscreenlockLo]                ; "-[LWScreenLock lockScreenImmediateUsingShortTimeout:]"
+0000000100062c85         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100062c89         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100062c90         lea        rcx, qword [aSErrorLockscre]                ; argument "format" for method imp___stubs___os_log_impl, "%s | ERROR | lockScreenImmediate: attempt to lock the screen on a guest account"
+0000000100062c97         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100062c99         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100062c9f         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100062ca2         call       imp___stubs___os_log_impl                   ; _os_log_impl
+0000000100062ca7         jmp        loc_100062db7
+
+                     loc_100062cac:
+0000000100062cac         mov        rax, qword [objc_ivar_offset_LWScreenLock__screenLockImmediateIsActive] ; objc_ivar_offset_LWScreenLock__screenLockImmediateIsActive, CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+162
+0000000100062cb3         mov        byte [r14+rax], 0x1
+0000000100062cb8         mov        rax, qword [__NSConcreteStackBlock_1000ef1c8] ; __NSConcreteStackBlock_1000ef1c8
+0000000100062cbf         lea        rdi, qword [rbp+var_70]
+0000000100062cc3         mov        qword [rdi], rax
+0000000100062cc6         mov        eax, 0xc2000000
+0000000100062ccb         mov        qword [rdi+8], rax
+0000000100062ccf         lea        rax, qword [sub_100062e1c]                  ; sub_100062e1c
+0000000100062cd6         mov        qword [rdi+0x10], rax
+0000000100062cda         lea        rax, qword [qword_value_4295888224+1040]    ; 0x1000f1670
+0000000100062ce1         mov        qword [rdi+0x18], rax
+0000000100062ce5         mov        qword [rdi+0x20], r14
+0000000100062ce9         mov        byte [rdi+0x28], r15b                       ; argument #1 for method sub_1000464bf
+0000000100062ced         call       sub_1000464bf                               ; sub_1000464bf
+0000000100062cf2         mov        rdi, qword [objc_cls_ref_NSUserDefaults]    ; objc_cls_ref_NSUserDefaults
+0000000100062cf9         mov        rsi, qword [0x10010e098]                    ; @selector(standardUserDefaults)
+0000000100062d00         call       rbx
+0000000100062d02         mov        rsi, qword [0x10010e800]                    ; @selector(boolForKey:)
+0000000100062d09         lea        rdx, qword [cfstring_immediateLockLaunchesScreenSaver] ; @"immediateLockLaunchesScreenSaver"
+0000000100062d10         mov        rdi, rax
+0000000100062d13         call       rbx
+0000000100062d15         test       al, al
+0000000100062d17         je         loc_100062d3a
+
+                     loc_100062d19:
+0000000100062d19         mov        rdi, qword [objc_cls_ref_ScreenSaverDaemon] ; objc_cls_ref_ScreenSaverDaemon, CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+557, -[LWScreenLock lockScreenImmediateUsingShortTimeout:]+615
+0000000100062d20         mov        rsi, qword [0x10010de10]                    ; @selector(sharedScreenSaverDaemon)
+0000000100062d27         call       rbx
+0000000100062d29         mov        rsi, qword [0x10010f9a0]                    ; @selector(screenSaverStartNow:)
+0000000100062d30         mov        edx, 0x1
+0000000100062d35         mov        rdi, rax
+0000000100062d38         jmp        loc_100062db5
+
+                     loc_100062d3a:
+0000000100062d3a         call       sub_100044a47                               ; sub_100044a47, CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+364
+0000000100062d3f         mov        r12d, eax
+0000000100062d42         mov        rdi, qword [r13]                            ; argument #1 for method sub_100056b7e
+0000000100062d46         call       sub_100056b7e                               ; sub_100056b7e
+0000000100062d4b         mov        r15, rax
+0000000100062d4e         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100062d50         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100062d53         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100062d58         test       r12b, r12b
+0000000100062d5b         je         loc_100062dd6
+
+0000000100062d5d         test       al, al
+0000000100062d5f         je         loc_100062d95
+
+0000000100062d61         lea        r8, qword [rbp+var_40]
+0000000100062d65         mov        dword [r8], 0x8200102
+0000000100062d6c         lea        rax, qword [aLwscreenlockLo]                ; "-[LWScreenLock lockScreenImmediateUsingShortTimeout:]"
+0000000100062d73         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100062d77         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100062d7e         lea        rcx, qword [aSStartingADire]                ; argument "format" for method imp___stubs___os_log_impl, "%s |    starting a direct lock from lock immediate"
+0000000100062d85         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100062d87         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100062d8d         mov        rsi, r15                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100062d90         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100062d95:
+0000000100062d95         mov        rsi, qword [0x10010e1d0]                    ; @selector(enqueueLockScreenRequestedBy:), CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+436
+0000000100062d9c         mov        edx, 0x7
+0000000100062da1         mov        rdi, r14
+0000000100062da4         call       rbx
+0000000100062da6         mov        rsi, qword [0x10010e1d8]                    ; @selector(enqueueUnlockScreenRequestedBy:)
+0000000100062dad         mov        edx, 0x7
+0000000100062db2         mov        rdi, r14
+
+                     loc_100062db5:
+0000000100062db5         call       rbx                                         ; CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+397
+
+                     loc_100062db7:
+0000000100062db7         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0, CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+194, -[LWScreenLock lockScreenImmediateUsingShortTimeout:]+252
+0000000100062dbe         mov        rax, qword [rax]
+0000000100062dc1         cmp        rax, qword [rbp+var_30]
+0000000100062dc5         jne        loc_100062e17
+
+0000000100062dc7         add        rsp, 0x48
+0000000100062dcb         pop        rbx
+0000000100062dcc         pop        r12
+0000000100062dce         pop        r13
+0000000100062dd0         pop        r14
+0000000100062dd2         pop        r15
+0000000100062dd4         pop        rbp
+0000000100062dd5         ret
+                        ; endp
+
+                     loc_100062dd6:
+0000000100062dd6         test       al, al                                      ; CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+432
+0000000100062dd8         je         loc_100062d19
+
+0000000100062dde         lea        r8, qword [rbp+var_40]
+0000000100062de2         mov        dword [r8], 0x8200102
+0000000100062de9         lea        rax, qword [aLwscreenlockLo]                ; "-[LWScreenLock lockScreenImmediateUsingShortTimeout:]"
+0000000100062df0         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100062df4         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100062dfb         lea        rcx, qword [aSSessionIsNotO_1000c6c10]      ; argument "format" for method imp___stubs___os_log_impl, "%s | Session is not on console, launch screen saver instead of sleeping the display"
+0000000100062e02         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100062e04         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100062e0a         mov        rsi, r15                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100062e0d         call       imp___stubs___os_log_impl                   ; _os_log_impl
+0000000100062e12         jmp        loc_100062d19
+
+                     loc_100062e17:
+0000000100062e17         call       imp___stubs____stack_chk_fail               ; __stack_chk_fail, CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+538
+                        ; endp
+
+
+
+0000000100028b0f         push       rbp                                         ; Objective C Implementation defined at 0x100102768 (instance method), DATA XREF=0x100102768
+0000000100028b10         mov        rbp, rsp
+0000000100028b13         push       r15
+0000000100028b15         push       r14
+0000000100028b17         push       r13
+0000000100028b19         push       r12
+0000000100028b1b         push       rbx
+0000000100028b1c         sub        rsp, 0xb8
+0000000100028b23         mov        r14d, edx
+0000000100028b26         mov        r13, rdi
+0000000100028b29         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0
+0000000100028b30         mov        rax, qword [rax]
+0000000100028b33         mov        qword [rbp+var_30], rax
+0000000100028b37         mov        r15, qword [objc_ivar_offset_LWScreenLock__lockRequestInProgress] ; objc_ivar_offset_LWScreenLock__lockRequestInProgress
+0000000100028b3e         mov        byte [rdi+r15], 0x1
+0000000100028b43         lea        rax, qword [qword_100114298]                ; qword_100114298
+0000000100028b4a         test       byte [rax+1], 0x4
+0000000100028b4e         jne        loc_100028b5c
+
+0000000100028b50         lea        r12, qword [aKlwlockuniniti]                ; "kLWLockUninitialized"
+0000000100028b57         jmp        loc_100028be5
+
+                     loc_100028b5c:
+0000000100028b5c         lea        eax, dword [r14-1]                          ; CODE XREF=-[LWScreenLock startScreenLock:]+63
+0000000100028b60         cmp        eax, 0x6
+0000000100028b63         ja         loc_100028b74
+
+0000000100028b65         cdqe
+0000000100028b67         lea        rcx, qword [qword_value_0+24]               ; 0x1000f1770
+0000000100028b6e         mov        r12, qword [rcx+rax*8]
+0000000100028b72         jmp        loc_100028b7b
+
+                     loc_100028b74:
+0000000100028b74         lea        r12, qword [aKlwlockuniniti]                ; "kLWLockUninitialized", CODE XREF=-[LWScreenLock startScreenLock:]+84
+
+                     loc_100028b7b:
+0000000100028b7b         lea        rax, qword [qword_100113d08+8]              ; 0x100113d10, CODE XREF=-[LWScreenLock startScreenLock:]+99
+0000000100028b82         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+0000000100028b85         call       sub_100056b7e                               ; sub_100056b7e
+0000000100028b8a         mov        rbx, rax
+0000000100028b8d         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100028b8f         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100028b92         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100028b97         test       al, al
+0000000100028b99         je         loc_100028be5
+
+0000000100028b9b         lea        r8, qword [rbp+var_60]
+0000000100028b9f         mov        dword [r8], 0x8200302
+0000000100028ba6         lea        rax, qword [aLwscreenlockpr]                ; "-[LWScreenLock(Private) startScreenLock:]"
+0000000100028bad         mov        qword [r8+4], rax
+0000000100028bb1         mov        word [r8+0xc], 0x400
+0000000100028bb8         mov        dword [r8+0xe], r14d
+0000000100028bbc         mov        word [r8+0x12], 0x820
+0000000100028bc3         mov        qword [r8+0x14], r12                        ; argument "buf" for method imp___stubs___os_log_impl
+0000000100028bc7         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100028bce         lea        rcx, qword [aSEnteredReques_1000c77b0]      ; argument "format" for method imp___stubs___os_log_impl, "%s | entered. requestedby(%d): %s"
+0000000100028bd5         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100028bd7         mov        r9d, 0x1c                                   ; argument "size" for method imp___stubs___os_log_impl
+0000000100028bdd         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100028be0         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100028be5:
+0000000100028be5         mov        rsi, qword [0x10010fa48]                    ; @selector(userIsActiveCheck), CODE XREF=-[LWScreenLock startScreenLock:]+72, -[LWScreenLock startScreenLock:]+138
+0000000100028bec         mov        rdi, r13
+0000000100028bef         call       qword [_objc_msgSend_1000ef540]             ; _objc_msgSend, _objc_msgSend_1000ef540
+0000000100028bf5         mov        ecx, r14d
+0000000100028bf8         and        ecx, 0xfffffffe
+0000000100028bfb         cmp        ecx, 0x4
+0000000100028bfe         jne        loc_100028c59
+
+0000000100028c00         cmp        al, 0x1
+0000000100028c02         jne        loc_100028c59
+
+0000000100028c04         lea        rax, qword [qword_100113d08+8]              ; 0x100113d10
+0000000100028c0b         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+0000000100028c0e         call       sub_100056b7e                               ; sub_100056b7e
+0000000100028c13         mov        rbx, rax
+0000000100028c16         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100028c18         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100028c1b         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100028c20         test       al, al
+0000000100028c22         je         loc_100028fce
+
+0000000100028c28         lea        r8, qword [rbp+var_60]
+0000000100028c2c         mov        dword [r8], 0x8200102
+0000000100028c33         lea        rax, qword [aLwscreenlockpr]                ; "-[LWScreenLock(Private) startScreenLock:]"
+0000000100028c3a         mov        qword [r8+4], rax
+0000000100028c3e         lea        rdi, qword [__mh_execute_header]            ; __mh_execute_header
+0000000100028c45         lea        rcx, qword [aSDumpingAReque]                ; "%s |      dumping a request to lock the screen because the user is active"
+0000000100028c4c         xor        edx, edx
+0000000100028c4e         mov        r9d, 0xc
+0000000100028c54         jmp        loc_100028fc6
+
+                     loc_100028c59:
+0000000100028c59         mov        rsi, qword [0x10010ece8]                    ; @selector(warmup), CODE XREF=-[LWScreenLock startScreenLock:]+239, -[LWScreenLock startScreenLock:]+243
+0000000100028c60         mov        rdi, r13
+0000000100028c63         call       qword [_objc_msgSend_1000ef540]             ; _objc_msgSend, _objc_msgSend_1000ef540
+0000000100028c69         call       sub_10002950b                               ; sub_10002950b
+0000000100028c6e         mov        edi, 0x1
+0000000100028c73         call       imp___stubs___FSSetDisableNetworkVolumes    ; _FSSetDisableNetworkVolumes
+0000000100028c78         mov        rax, qword [objc_ivar_offset_LWScreenLock__lockReqestedBy] ; objc_ivar_offset_LWScreenLock__lockReqestedBy
+0000000100028c7f         cmp        dword [r13+rax], r14d
+0000000100028c84         jae        loc_100028e9a
+
+0000000100028c8a         lea        rax, qword [qword_100113d08+8]              ; 0x100113d10
+0000000100028c91         mov        r15, rax
+0000000100028c94         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+0000000100028c97         call       sub_100056b7e                               ; sub_100056b7e
+0000000100028c9c         mov        rbx, rax
+0000000100028c9f         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100028ca1         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100028ca4         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100028ca9         test       al, al
+0000000100028cab         je         loc_100028d0e
+
+0000000100028cad         mov        rax, qword [objc_ivar_offset_LWScreenLock__lockReqestedBy] ; objc_ivar_offset_LWScreenLock__lockReqestedBy
+0000000100028cb4         mov        eax, dword [r13+rax]
+0000000100028cb9         lea        r8, qword [rbp+var_60]
+0000000100028cbd         mov        dword [r8], 0x8200402
+0000000100028cc4         lea        rcx, qword [aLwscreenlockpr]                ; "-[LWScreenLock(Private) startScreenLock:]"
+0000000100028ccb         mov        qword [r8+4], rcx
+0000000100028ccf         mov        cx, 0x400
+0000000100028cd3         mov        word [r8+0xc], cx
+0000000100028cd8         mov        dword [r8+0xe], eax
+0000000100028cdc         mov        word [r8+0x12], cx
+0000000100028ce1         mov        dword [r8+0x14], r14d
+0000000100028ce5         mov        word [r8+0x18], 0x820
+0000000100028cec         mov        qword [r8+0x1a], r12                        ; argument "buf" for method imp___stubs___os_log_impl
+0000000100028cf0         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100028cf7         lea        rcx, qword [aSBumpingLockre_1000c7830]      ; argument "format" for method imp___stubs___os_log_impl, "%s |      Bumping _lockReqestedBy from:%d to type(%d): %s"
+0000000100028cfe         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100028d00         mov        r9d, 0x22                                   ; argument "size" for method imp___stubs___os_log_impl
+0000000100028d06         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100028d09         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100028d0e:
+0000000100028d0e         cmp        r14d, 0x6                                   ; CODE XREF=-[LWScreenLock startScreenLock:]+412
+0000000100028d12         jne        loc_100028d6e
+
+0000000100028d14         mov        rdi, qword [r15]                            ; argument #1 for method sub_100056b7e
+0000000100028d17         call       sub_100056b7e                               ; sub_100056b7e
+0000000100028d1c         mov        rbx, rax
+0000000100028d1f         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100028d21         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100028d24         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100028d29         test       al, al
+0000000100028d2b         je         loc_100028d61
+
+0000000100028d2d         lea        r8, qword [rbp+var_60]
+0000000100028d31         mov        dword [r8], 0x8200102
+0000000100028d38         lea        rax, qword [aLwscreenlockpr]                ; "-[LWScreenLock(Private) startScreenLock:]"
+0000000100028d3f         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100028d43         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100028d4a         lea        rcx, qword [aSLockViaCookie]                ; argument "format" for method imp___stubs___os_log_impl, "%s |      Lock via cookie file, set _screenLockImmediateIsActive = YES"
+0000000100028d51         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100028d53         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100028d59         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100028d5c         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100028d61:
+0000000100028d61         mov        rax, qword [objc_ivar_offset_LWScreenLock__screenLockImmediateIsActive] ; objc_ivar_offset_LWScreenLock__screenLockImmediateIsActive, CODE XREF=-[LWScreenLock startScreenLock:]+540
+0000000100028d68         mov        byte [r13+rax], 0x1
+
+                     loc_100028d6e:
+0000000100028d6e         mov        rdi, qword [r15]                            ; argument #1 for method sub_100056b7e, CODE XREF=-[LWScreenLock startScreenLock:]+515
+0000000100028d71         call       sub_100056b7e                               ; sub_100056b7e
+0000000100028d76         mov        rbx, rax
+0000000100028d79         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100028d7b         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100028d7e         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100028d83         test       al, al
+0000000100028d85         je         loc_100028dbb
+
+0000000100028d87         lea        r8, qword [rbp+var_60]
+0000000100028d8b         mov        dword [r8], 0x8200102
+0000000100028d92         lea        rax, qword [aLwscreenlockpr]                ; "-[LWScreenLock(Private) startScreenLock:]"
+0000000100028d99         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100028d9d         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100028da4         lea        rcx, qword [aSRaisingShield]                ; argument "format" for method imp___stubs___os_log_impl, "%s |      Raising shield window if it isn't already showing"
+0000000100028dab         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100028dad         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100028db3         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100028db6         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100028dbb:
+0000000100028dbb         mov        rdi, qword [objc_cls_ref_LWShieldWindowController] ; objc_cls_ref_LWShieldWindowController, CODE XREF=-[LWScreenLock startScreenLock:]+630
+0000000100028dc2         mov        rsi, qword [0x10010e6c8]                    ; @selector(sharedController)
+0000000100028dc9         mov        rbx, qword [_objc_msgSend_1000ef540]        ; _objc_msgSend_1000ef540
+0000000100028dd0         call       rbx
+0000000100028dd2         mov        rsi, qword [0x10010f9a8]                    ; @selector(raiseShieldWindowWithFade:)
+0000000100028dd9         xor        edx, edx
+0000000100028ddb         mov        rdi, rax
+0000000100028dde         call       rbx
+0000000100028de0         mov        rdi, qword [r15]                            ; argument #1 for method sub_100056b7e
+0000000100028de3         call       sub_100056b7e                               ; sub_100056b7e
+0000000100028de8         mov        rbx, rax
+0000000100028deb         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100028ded         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100028df0         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100028df5         test       al, al
+0000000100028df7         je         loc_100028e2d
+
+0000000100028df9         lea        r8, qword [rbp+var_60]
+0000000100028dfd         mov        dword [r8], 0x8200102
+0000000100028e04         lea        rax, qword [aLwscreenlockpr]                ; "-[LWScreenLock(Private) startScreenLock:]"
+0000000100028e0b         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100028e0f         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100028e16         lea        rcx, qword [aSSettingWakefo]                ; argument "format" for method imp___stubs___os_log_impl, "%s |      setting _wakeForIncomingMessage to NO"
+0000000100028e1d         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100028e1f         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100028e25         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100028e28         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100028e2d:
+0000000100028e2d         mov        rax, qword [objc_ivar_offset_LWScreenLock__wakeForIncomingMessage] ; objc_ivar_offset_LWScreenLock__wakeForIncomingMessage, CODE XREF=-[LWScreenLock startScreenLock:]+744
+0000000100028e34         mov        byte [r13+rax], 0x0
+0000000100028e3a         mov        rbx, qword [objc_ivar_offset_LWScreenLock__lockReqestedBy] ; objc_ivar_offset_LWScreenLock__lockReqestedBy
+0000000100028e41         mov        eax, dword [r13+rbx]
+0000000100028e46         dec        eax
+0000000100028e48         cmp        eax, 0x2
+0000000100028e4b         ja         loc_100028e95
+
+0000000100028e4d         mov        rax, qword [objc_ivar_offset_LWScreenLock__useDefaultScreenLockUI] ; objc_ivar_offset_LWScreenLock__useDefaultScreenLockUI
+0000000100028e54         cmp        byte [r13+rax], 0x0
+0000000100028e5a         je         loc_100028e95
+
+0000000100028e5c         mov        rax, qword [__NSConcreteStackBlock_1000ef1c8] ; __NSConcreteStackBlock_1000ef1c8
+0000000100028e63         lea        rdi, qword [rbp+var_E0]
+0000000100028e6a         mov        qword [rdi], rax
+0000000100028e6d         mov        eax, 0xc2000000
+0000000100028e72         mov        qword [rdi+8], rax
+0000000100028e76         lea        rax, qword [sub_100065673]                  ; sub_100065673
+0000000100028e7d         mov        qword [rdi+0x10], rax
+0000000100028e81         lea        rax, qword [qword_value_4295888224+768]     ; 0x1000f1560
+0000000100028e88         mov        qword [rdi+0x18], rax
+0000000100028e8c         mov        qword [rdi+0x20], r13                       ; argument #1 for method sub_1000464bf
+0000000100028e90         call       sub_1000464bf                               ; sub_1000464bf
+
+                     loc_100028e95:
+0000000100028e95         mov        dword [r13+rbx], r14d                       ; CODE XREF=-[LWScreenLock startScreenLock:]+828, -[LWScreenLock startScreenLock:]+843
+
+                     loc_100028e9a:
+0000000100028e9a         mov        r15, qword [__NSConcreteStackBlock_1000ef1c8] ; __NSConcreteStackBlock_1000ef1c8, CODE XREF=-[LWScreenLock startScreenLock:]+373
+0000000100028ea1         lea        rdi, qword [rbp+var_B8]
+0000000100028ea8         mov        qword [rdi], r15
+0000000100028eab         mov        eax, 0xc2000000
+0000000100028eb0         mov        qword [rdi+8], rax
+0000000100028eb4         lea        rax, qword [sub_100065694]                  ; sub_100065694
+0000000100028ebb         mov        qword [rdi+0x10], rax
+0000000100028ebf         lea        r12, qword [qword_value_4295888224+768]     ; 0x1000f1560
+0000000100028ec6         mov        qword [rdi+0x18], r12
+0000000100028eca         mov        qword [rdi+0x20], r13                       ; argument #1 for method sub_1000464bf
+0000000100028ece         call       sub_1000464bf                               ; sub_1000464bf
+0000000100028ed3         mov        rdi, qword [objc_cls_ref_ScreenSaverDaemon] ; objc_cls_ref_ScreenSaverDaemon
+0000000100028eda         mov        rsi, qword [0x10010de10]                    ; @selector(sharedScreenSaverDaemon)
+0000000100028ee1         mov        rbx, qword [_objc_msgSend_1000ef540]        ; _objc_msgSend_1000ef540
+0000000100028ee8         call       rbx
+0000000100028eea         mov        rsi, qword [0x10010f8f0]                    ; @selector(atLoginwindow)
+0000000100028ef1         mov        rdi, rax
+0000000100028ef4         call       rbx
+0000000100028ef6         test       al, al
+0000000100028ef8         je         loc_100028f03
+
+0000000100028efa         lea        r14, qword [aAtloginwindowE]                ; "    atLoginwindow, exit"
+0000000100028f01         jmp        loc_100028f68
+
+                     loc_100028f03:
+0000000100028f03         mov        rdi, qword [objc_cls_ref_SessionLogoutManager] ; objc_cls_ref_SessionLogoutManager, CODE XREF=-[LWScreenLock startScreenLock:]+1001
+0000000100028f0a         mov        rsi, qword [0x10010dbc8]                    ; @selector(sharedSessionLogoutManager)
+0000000100028f11         call       rbx
+0000000100028f13         mov        rsi, qword [0x10010e090]                    ; @selector(pastThePointOfNoReturn)
+0000000100028f1a         mov        rdi, rax
+0000000100028f1d         call       rbx
+0000000100028f1f         test       al, al
+0000000100028f21         je         loc_100028f2c
+
+0000000100028f23         lea        r14, qword [aPastThePointOf]                ; "    past the point of no return"
+0000000100028f2a         jmp        loc_100028f68
+
+                     loc_100028f2c:
+0000000100028f2c         mov        rax, qword [objc_ivar_offset_LWScreenLock__userSwitchedOut] ; objc_ivar_offset_LWScreenLock__userSwitchedOut, CODE XREF=-[LWScreenLock startScreenLock:]+1042
+0000000100028f33         cmp        byte [r13+rax], 0x1
+0000000100028f39         jne        loc_100028f44
+
+0000000100028f3b         lea        r14, qword [aThisSessionIsN]                ; "    this session is not on console, exit"
+0000000100028f42         jmp        loc_100028f68
+
+                     loc_100028f44:
+0000000100028f44         mov        rbx, qword [objc_ivar_offset_LWScreenLock__startLockTime] ; objc_ivar_offset_LWScreenLock__startLockTime, CODE XREF=-[LWScreenLock startScreenLock:]+1066
+0000000100028f4b         movsd      xmm0, qword [r13+rbx]
+0000000100028f52         xorps      xmm1, xmm1
+0000000100028f55         ucomisd    xmm0, xmm1
+0000000100028f59         jne        loc_100028f61
+
+0000000100028f5b         jnp        loc_100028ffa
+
+                     loc_100028f61:
+0000000100028f61         lea        r14, qword [aStartlocktimeA]                ; "    _startLockTime already inited, exit", CODE XREF=-[LWScreenLock startScreenLock:]+1098
+
+                     loc_100028f68:
+0000000100028f68         lea        rax, qword [qword_100113d08+8]              ; 0x100113d10, CODE XREF=-[LWScreenLock startScreenLock:]+1010, -[LWScreenLock startScreenLock:]+1051, -[LWScreenLock startScreenLock:]+1075
+0000000100028f6f         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+0000000100028f72         call       sub_100056b7e                               ; sub_100056b7e
+0000000100028f77         mov        rbx, rax
+0000000100028f7a         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100028f7c         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100028f7f         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100028f84         test       al, al
+0000000100028f86         mov        r15, qword [objc_ivar_offset_LWScreenLock__lockRequestInProgress] ; objc_ivar_offset_LWScreenLock__lockRequestInProgress
+0000000100028f8d         je         loc_100028fce
+
+0000000100028f8f         lea        r8, qword [rbp+var_60]
+0000000100028f93         mov        dword [r8], 0x8200202
+0000000100028f9a         lea        rax, qword [aLwscreenlockpr]                ; "-[LWScreenLock(Private) startScreenLock:]"
+0000000100028fa1         mov        qword [r8+4], rax
+0000000100028fa5         mov        word [r8+0xc], 0x820
+0000000100028fac         mov        qword [r8+0xe], r14                         ; argument "buf" for method imp___stubs___os_log_impl
+0000000100028fb0         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100028fb7         lea        rcx, qword [aSS_1000c55f0]                  ; argument "format" for method imp___stubs___os_log_impl, "%s | %s"
+0000000100028fbe         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100028fc0         mov        r9d, 0x16                                   ; argument "size" for method imp___stubs___os_log_impl
+
+                     loc_100028fc6:
+0000000100028fc6         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl, CODE XREF=-[LWScreenLock startScreenLock:]+325
+0000000100028fc9         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100028fce:
+0000000100028fce         mov        byte [r13+r15], 0x0                         ; CODE XREF=-[LWScreenLock startScreenLock:]+275, -[LWScreenLock startScreenLock:]+1150
+
+                     loc_100028fd4:
+0000000100028fd4         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0, CODE XREF=-[LWScreenLock startScreenLock:]+2488, -[LWScreenLock startScreenLock:]+2546
+0000000100028fdb         mov        rax, qword [rax]
+0000000100028fde         cmp        rax, qword [rbp+var_30]
+0000000100028fe2         jne        loc_100029506
+
+0000000100028fe8         add        rsp, 0xb8
+0000000100028fef         pop        rbx
+0000000100028ff0         pop        r12
+0000000100028ff2         pop        r13
+0000000100028ff4         pop        r14
+0000000100028ff6         pop        r15
+0000000100028ff8         pop        rbp
+0000000100028ff9         ret
+                        ; endp
+
+                     loc_100028ffa:
+0000000100028ffa         mov        rsi, qword [0x10010fa60]                    ; @selector(setCGScreenLocked), CODE XREF=-[LWScreenLock startScreenLock:]+1100
+0000000100029001         mov        rdi, r13
+0000000100029004         call       qword [_objc_msgSend_1000ef540]             ; _objc_msgSend, _objc_msgSend_1000ef540
+000000010002900a         call       imp___stubs__CFAbsoluteTimeGetCurrent       ; CFAbsoluteTimeGetCurrent
+000000010002900f         movsd      qword [r13+rbx], xmm0
+0000000100029016         lea        rax, qword [qword_100113d08+8]              ; 0x100113d10
+000000010002901d         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+0000000100029020         call       sub_100056b7e                               ; sub_100056b7e
+0000000100029025         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100029027         mov        qword [rbp+var_68], rax
+000000010002902b         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+000000010002902e         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100029033         test       al, al
+0000000100029035         je         loc_10002907c
+
+0000000100029037         mov        rax, qword [r13+rbx]
+000000010002903c         lea        r8, qword [rbp+var_60]
+0000000100029040         mov        dword [r8], 0x8200202
+0000000100029047         lea        rcx, qword [aLwscreenlockpr]                ; "-[LWScreenLock(Private) startScreenLock:]"
+000000010002904e         mov        qword [r8+4], rcx
+0000000100029052         mov        word [r8+0xc], 0x800
+0000000100029059         mov        qword [r8+0xe], rax                         ; argument "buf" for method imp___stubs___os_log_impl
+000000010002905d         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100029064         lea        rcx, qword [aSStartlocktime_1000c7930]      ; argument "format" for method imp___stubs___os_log_impl, "%s |      _startLockTime secs set to:%f"
+000000010002906b         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+000000010002906d         mov        r9d, 0x16                                   ; argument "size" for method imp___stubs___os_log_impl
+0000000100029073         mov        rsi, qword [rbp+var_68]                     ; argument "log" for method imp___stubs___os_log_impl
+0000000100029077         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_10002907c:
+000000010002907c         mov        rdi, qword [objc_cls_ref_LWShieldWindowController] ; objc_cls_ref_LWShieldWindowController, CODE XREF=-[LWScreenLock startScreenLock:]+1318
+0000000100029083         mov        rsi, qword [0x10010e6c8]                    ; @selector(sharedController)
+000000010002908a         mov        rbx, qword [_objc_msgSend_1000ef540]        ; _objc_msgSend_1000ef540
+0000000100029091         call       rbx
+0000000100029093         mov        rsi, qword [0x10010f9a8]                    ; @selector(raiseShieldWindowWithFade:)
+000000010002909a         xor        edx, edx
+000000010002909c         mov        rdi, rax
+000000010002909f         call       rbx
+00000001000290a1         mov        rax, qword [objc_ivar_offset_LWScreenLock__useDefaultScreenLockUI] ; objc_ivar_offset_LWScreenLock__useDefaultScreenLockUI
+00000001000290a8         cmp        byte [r13+rax], 0x0
+00000001000290ae         je         loc_100029129
+
+00000001000290b0         mov        rdi, qword [objc_cls_ref_LWScreenLockAuthentication] ; objc_cls_ref_LWScreenLockAuthentication
+00000001000290b7         mov        rsi, qword [0x10010f930]                    ; @selector(sharedAuthentication)
+00000001000290be         call       rbx
+00000001000290c0         mov        rsi, qword [0x10010fa68]                    ; @selector(preLoad)
+00000001000290c7         mov        rdi, rax
+00000001000290ca         call       rbx
+00000001000290cc         mov        rdi, qword [objc_cls_ref_NSUserDefaults]    ; objc_cls_ref_NSUserDefaults
+00000001000290d3         mov        rsi, qword [0x10010e098]                    ; @selector(standardUserDefaults)
+00000001000290da         call       rbx
+00000001000290dc         mov        rsi, qword [0x10010e800]                    ; @selector(boolForKey:)
+00000001000290e3         lea        rdx, qword [cfstring_immediateLockStartsAutoUnlock] ; @"immediateLockStartsAutoUnlock"
+00000001000290ea         mov        rdi, rax
+00000001000290ed         call       rbx
+00000001000290ef         mov        rsi, qword [0x10010fa70]                    ; @selector(setImmediateLockStartsAutoUnlock:)
+00000001000290f6         movsx      edx, al
+00000001000290f9         mov        rdi, r13
+00000001000290fc         call       rbx
+00000001000290fe         lea        rdi, qword [rbp+var_90]
+0000000100029105         mov        qword [rdi], r15
+0000000100029108         mov        eax, 0xc2000000
+000000010002910d         mov        qword [rdi+8], rax
+0000000100029111         lea        rax, qword [sub_100065747]                  ; sub_100065747
+0000000100029118         mov        qword [rdi+0x10], rax
+000000010002911c         mov        qword [rdi+0x18], r12
+0000000100029120         mov        qword [rdi+0x20], r13                       ; argument #1 for method sub_1000464bf
+0000000100029124         call       sub_1000464bf                               ; sub_1000464bf
+
+                     loc_100029129:
+0000000100029129         lea        rax, qword [qword_100113d08+8]              ; 0x100113d10, CODE XREF=-[LWScreenLock startScreenLock:]+1439
+0000000100029130         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+0000000100029133         call       sub_100056b7e                               ; sub_100056b7e
+0000000100029138         mov        rbx, rax
+000000010002913b         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+000000010002913d         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100029140         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100029145         test       al, al
+0000000100029147         je         loc_10002917d
+
+0000000100029149         lea        r8, qword [rbp+var_60]
+000000010002914d         mov        dword [r8], 0x8200102
+0000000100029154         lea        rax, qword [aLwscreenlockpr]                ; "-[LWScreenLock(Private) startScreenLock:]"
+000000010002915b         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+000000010002915f         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100029166         lea        rcx, qword [aSDisablingHotk]                ; argument "format" for method imp___stubs___os_log_impl, "%s |      disabling hotkeys"
+000000010002916d         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+000000010002916f         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100029175         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100029178         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_10002917d:
+000000010002917d         mov        rsi, qword [0x10010ea60]                    ; @selector(disableHotKeys), CODE XREF=-[LWScreenLock startScreenLock:]+1592
+0000000100029184         mov        rdi, r13
+0000000100029187         mov        rbx, qword [_objc_msgSend_1000ef540]        ; _objc_msgSend_1000ef540
+000000010002918e         call       rbx
+0000000100029190         mov        rsi, qword [0x10010f958]                    ; @selector(setScreenIsLocked:)
+0000000100029197         mov        edx, 0x1
+000000010002919c         mov        rdi, r13
+000000010002919f         call       rbx
+00000001000291a1         mov        rdi, qword [objc_cls_ref_LWKeybagSupport]   ; objc_cls_ref_LWKeybagSupport
+00000001000291a8         mov        rsi, qword [0x10010e218]                    ; @selector(sharedLWKeybagSupport)
+00000001000291af         call       rbx
+00000001000291b1         mov        rcx, qword [objc_ivar_offset_LWScreenLock__screenLockImmediateIsActive] ; objc_ivar_offset_LWScreenLock__screenLockImmediateIsActive
+00000001000291b8         movsx      edx, byte [r13+rcx]
+00000001000291be         mov        rsi, qword [0x10010fa78]                    ; @selector(lockKeybagForScreenLock:)
+00000001000291c5         mov        rdi, rax
+00000001000291c8         call       rbx
+00000001000291ca         mov        rsi, qword [0x10010ea78]                    ; @selector(setLoginWindowAsOnlyFrontmostApp:)
+00000001000291d1         mov        edx, 0x1
+00000001000291d6         mov        rdi, r13
+00000001000291d9         call       rbx
+00000001000291db         lea        rax, qword [qword_100114290]                ; qword_100114290
+00000001000291e2         mov        rdi, qword [rax]
+00000001000291e5         mov        rsi, qword [0x10010dba8]                    ; @selector(activateIgnoringOtherApps:)
+00000001000291ec         mov        edx, 0x1
+00000001000291f1         call       rbx
+00000001000291f3         mov        r15, qword [objc_ivar_offset_LWScreenLock__preferredScreenLockDelay] ; objc_ivar_offset_LWScreenLock__preferredScreenLockDelay
+00000001000291fa         mov        r12d, dword [r13+r15]
+00000001000291ff         lea        rax, qword [qword_100113d08+8]              ; 0x100113d10
+0000000100029206         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+0000000100029209         call       sub_100056b7e                               ; sub_100056b7e
+000000010002920e         mov        rbx, rax
+0000000100029211         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100029213         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100029216         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+000000010002921b         cmp        r12d, 0x7fffffff
+0000000100029222         jne        loc_100029265
+
+0000000100029224         test       al, al
+0000000100029226         je         loc_100029325
+
+000000010002922c         lea        r8, qword [rbp+var_60]
+0000000100029230         mov        dword [r8], 0x8200102
+0000000100029237         lea        rax, qword [aLwscreenlockpr]                ; "-[LWScreenLock(Private) startScreenLock:]"
+000000010002923e         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100029242         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100029249         lea        rcx, qword [aSPreferredscre_1000c79f0]      ; argument "format" for method imp___stubs___os_log_impl, "%s |      _preferredScreenLockDelay == INT_MAX"
+0000000100029250         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100029252         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100029258         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+000000010002925b         call       imp___stubs___os_log_impl                   ; _os_log_impl
+0000000100029260         jmp        loc_100029325
+
+                     loc_100029265:
+0000000100029265         test       al, al                                      ; CODE XREF=-[LWScreenLock startScreenLock:]+1811
+0000000100029267         je         loc_10002929d
+
+0000000100029269         lea        r8, qword [rbp+var_60]
+000000010002926d         mov        dword [r8], 0x8200102
+0000000100029274         lea        rax, qword [aLwscreenlockpr]                ; "-[LWScreenLock(Private) startScreenLock:]"
+000000010002927b         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+000000010002927f         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100029286         lea        rcx, qword [aSPreferredscre]                ; argument "format" for method imp___stubs___os_log_impl, "%s |      _preferredScreenLockDelay != INT_MAX"
+000000010002928d         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+000000010002928f         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100029295         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100029298         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_10002929d:
+000000010002929d         call       sub_100014da8                               ; sub_100014da8, CODE XREF=-[LWScreenLock startScreenLock:]+1880
+00000001000292a2         test       al, al
+00000001000292a4         je         loc_100029325
+
+00000001000292a6         lea        rax, qword [qword_100113d08+8]              ; 0x100113d10
+00000001000292ad         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+00000001000292b0         call       sub_100056b7e                               ; sub_100056b7e
+00000001000292b5         mov        rbx, rax
+00000001000292b8         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+00000001000292ba         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+00000001000292bd         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+00000001000292c2         test       al, al
+00000001000292c4         je         loc_1000292fa
+
+00000001000292c6         lea        r8, qword [rbp+var_60]
+00000001000292ca         mov        dword [r8], 0x8200102
+00000001000292d1         lea        rax, qword [aLwscreenlockpr]                ; "-[LWScreenLock(Private) startScreenLock:]"
+00000001000292d8         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+00000001000292dc         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+00000001000292e3         lea        rcx, qword [aSWritingAutolo]                ; argument "format" for method imp___stubs___os_log_impl, "%s |      writing autologin user screen is locked pref"
+00000001000292ea         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+00000001000292ec         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+00000001000292f2         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+00000001000292f5         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_1000292fa:
+00000001000292fa         mov        rdi, qword [objc_cls_ref_LoginDServer]      ; objc_cls_ref_LoginDServer, CODE XREF=-[LWScreenLock startScreenLock:]+1973
+0000000100029301         mov        rsi, qword [0x10010df38]                    ; @selector(sharedLoginDServer)
+0000000100029308         mov        rax, qword [_objc_msgSend_1000ef540]        ; _objc_msgSend_1000ef540
+000000010002930f         mov        rbx, rax
+0000000100029312         call       rax
+0000000100029314         mov        rsi, qword [0x10010e1e0]                    ; @selector(setAutoLoginUserScreenLocked:)
+000000010002931b         mov        edx, 0x1
+0000000100029320         mov        rdi, rax
+0000000100029323         call       rbx
+
+                     loc_100029325:
+0000000100029325         mov        r12, qword [objc_ivar_offset_LWScreenLock__askForPasswordPrompt] ; objc_ivar_offset_LWScreenLock__askForPasswordPrompt, CODE XREF=-[LWScreenLock startScreenLock:]+1815, -[LWScreenLock startScreenLock:]+1873, -[LWScreenLock startScreenLock:]+1941
+000000010002932c         cmp        qword [r13+r12], 0x0
+0000000100029332         jne        loc_10002937b
+
+0000000100029334         mov        rdi, qword [objc_cls_ref_localizedInfo]     ; objc_cls_ref_localizedInfo
+000000010002933b         mov        rsi, qword [0x10010d980]                    ; @selector(sharedLocalizedInfo)
+0000000100029342         mov        rax, qword [_objc_msgSend_1000ef540]        ; _objc_msgSend_1000ef540
+0000000100029349         mov        rbx, rax
+000000010002934c         call       rax
+000000010002934e         mov        rsi, qword [0x10010d988]                    ; @selector(_LWlocalizedStringForKey:value:table:)
+0000000100029355         lea        rdx, qword [cfstring_Enter_your_password_to_unlock_the_screen_] ; @"Enter your password to unlock the screen."
+000000010002935c         lea        r8, qword [cfstring_loginwindow]            ; @"loginwindow"
+0000000100029363         xor        ecx, ecx
+0000000100029365         mov        rdi, rax
+0000000100029368         call       rbx
+000000010002936a         mov        qword [r13+r12], rax
+000000010002936f         mov        rsi, qword [0x10010d950]                    ; @selector(retain)
+0000000100029376         mov        rdi, rax
+0000000100029379         call       rbx
+
+                     loc_10002937b:
+000000010002937b         mov        rsi, qword [0x10010ea68]                    ; @selector(sendScreenLockedNotification), CODE XREF=-[LWScreenLock startScreenLock:]+2083
+0000000100029382         mov        rdi, r13
+0000000100029385         call       qword [_objc_msgSend_1000ef540]             ; _objc_msgSend, _objc_msgSend_1000ef540
+000000010002938b         mov        edi, 0x1                                    ; argument #1 for method sub_10002adc8
+0000000100029390         call       sub_10002adc8                               ; sub_10002adc8
+0000000100029395         mov        r15d, dword [r13+r15]
+000000010002939a         lea        rax, qword [qword_100113d08+8]              ; 0x100113d10
+00000001000293a1         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+00000001000293a4         call       sub_100056b7e                               ; sub_100056b7e
+00000001000293a9         mov        rbx, rax
+00000001000293ac         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+00000001000293ae         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+00000001000293b1         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+00000001000293b6         cmp        r15d, 0x7fffffff
+00000001000293bd         jne        loc_100029412
+
+00000001000293bf         mov        rsi, rbx
+00000001000293c2         test       al, al
+00000001000293c4         mov        r15, qword [objc_ivar_offset_LWScreenLock__lockRequestInProgress] ; objc_ivar_offset_LWScreenLock__lockRequestInProgress
+00000001000293cb         mov        r12, qword [0x10010de10]                    ; @selector(sharedScreenSaverDaemon)
+00000001000293d2         mov        rbx, qword [_objc_msgSend_1000ef540]        ; _objc_msgSend_1000ef540
+00000001000293d9         je         loc_100029464
+
+00000001000293df         lea        r8, qword [rbp+var_60]
+00000001000293e3         mov        dword [r8], 0x8200102
+00000001000293ea         lea        rax, qword [aLwscreenlockpr]                ; "-[LWScreenLock(Private) startScreenLock:]"
+00000001000293f1         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+00000001000293f5         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+00000001000293fc         lea        rcx, qword [aSDoNotRegister]                ; argument "format" for method imp___stubs___os_log_impl, "%s |      Do not register DiskArbCallbacks lock delay = INT_MAX"
+0000000100029403         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100029405         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+000000010002940b         call       imp___stubs___os_log_impl                   ; _os_log_impl
+0000000100029410         jmp        loc_100029464
+
+                     loc_100029412:
+0000000100029412         test       al, al                                      ; CODE XREF=-[LWScreenLock startScreenLock:]+2222
+0000000100029414         mov        r15, qword [objc_ivar_offset_LWScreenLock__lockRequestInProgress] ; objc_ivar_offset_LWScreenLock__lockRequestInProgress
+000000010002941b         mov        r12, qword [0x10010de10]                    ; @selector(sharedScreenSaverDaemon)
+0000000100029422         je         loc_100029458
+
+0000000100029424         lea        r8, qword [rbp+var_60]
+0000000100029428         mov        dword [r8], 0x8200102
+000000010002942f         lea        rax, qword [aLwscreenlockpr]                ; "-[LWScreenLock(Private) startScreenLock:]"
+0000000100029436         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+000000010002943a         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100029441         lea        rcx, qword [aSRegisterdiska]                ; argument "format" for method imp___stubs___os_log_impl, "%s |      RegisterDiskArbCallbacks to block disk mounts during screen lock"
+0000000100029448         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+000000010002944a         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100029450         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100029453         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100029458:
+0000000100029458         call       sub_10002ae78                               ; sub_10002ae78, CODE XREF=-[LWScreenLock startScreenLock:]+2323
+000000010002945d         mov        rbx, qword [_objc_msgSend_1000ef540]        ; _objc_msgSend_1000ef540
+
+                     loc_100029464:
+0000000100029464         dec        r14d                                        ; CODE XREF=-[LWScreenLock startScreenLock:]+2250, -[LWScreenLock startScreenLock:]+2305
+0000000100029467         cmp        r14d, 0x2
+000000010002946b         ja         loc_100029485
+
+000000010002946d         mov        rdi, qword [objc_cls_ref_ScreenSaverDaemon] ; objc_cls_ref_ScreenSaverDaemon
+0000000100029474         mov        rsi, r12
+0000000100029477         call       rbx
+0000000100029479         mov        rsi, qword [0x10010d910]                    ; @selector(activate)
+0000000100029480         mov        rdi, rax
+0000000100029483         call       rbx
+
+                     loc_100029485:
+0000000100029485         mov        rdi, qword [objc_cls_ref_LWAuthServiceManager] ; objc_cls_ref_LWAuthServiceManager, CODE XREF=-[LWScreenLock startScreenLock:]+2396
+000000010002948c         mov        rsi, qword [0x10010dfb0]                    ; @selector(sharedManager)
+0000000100029493         call       rbx
+0000000100029495         mov        rsi, qword [0x10010fa80]                    ; @selector(activateAppropriateServicesAllowingAutoUnlock:)
+000000010002949c         xor        edx, edx
+000000010002949e         mov        rdi, rax
+00000001000294a1         call       rbx
+00000001000294a3         mov        byte [r13+r15], 0x0
+00000001000294a9         lea        rax, qword [qword_100113d08+8]              ; 0x100113d10
+00000001000294b0         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+00000001000294b3         call       sub_100056b7e                               ; sub_100056b7e
+00000001000294b8         mov        rbx, rax
+00000001000294bb         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+00000001000294bd         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+00000001000294c0         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+00000001000294c5         test       al, al
+00000001000294c7         je         loc_100028fd4
+
+00000001000294cd         lea        r8, qword [rbp+var_60]
+00000001000294d1         mov        dword [r8], 0x8200102
+00000001000294d8         lea        rax, qword [aLwscreenlockpr]                ; "-[LWScreenLock(Private) startScreenLock:]"
+00000001000294df         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+00000001000294e3         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+00000001000294ea         lea        rcx, qword [aSExit_1000bb0a0]               ; argument "format" for method imp___stubs___os_log_impl, "%s | exit"
+00000001000294f1         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+00000001000294f3         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+00000001000294f9         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+00000001000294fc         call       imp___stubs___os_log_impl                   ; _os_log_impl
+0000000100029501         jmp        loc_100028fd4
+
+                     loc_100029506:
+0000000100029506         call       imp___stubs____stack_chk_fail               ; __stack_chk_fail, CODE XREF=-[LWScreenLock startScreenLock:]+1235
+                        ; endp
+
+        ; ================ B E G I N N I N G   O F   P R O C E D U R E ================
+
+        ; Variables:
+        ;    var_30: int8_t, -48
+
+
+                     -[LWScreenLock _bumpScreenLock:]:
+0000000100062372         push       rbp                                         ; Objective C Implementation defined at 0x100102858 (instance method), DATA XREF=0x100102858
+0000000100062373         mov        rbp, rsp
+0000000100062376         sub        rsp, 0x30
+000000010006237a         mov        rcx, qword [__NSConcreteStackBlock_1000ef1c8] ; __NSConcreteStackBlock_1000ef1c8
+0000000100062381         lea        rax, qword [rbp+var_30]
+0000000100062385         mov        qword [rax], rcx
+0000000100062388         mov        ecx, 0xc2000000
+000000010006238d         mov        qword [rax+8], rcx
+0000000100062391         lea        rcx, qword [sub_1000623bc]                  ; sub_1000623bc
+0000000100062398         mov        qword [rax+0x10], rcx
+000000010006239c         lea        rcx, qword [qword_value_4295888224+864]     ; 0x1000f15c0
+00000001000623a3         mov        qword [rax+0x18], rcx
+00000001000623a7         mov        dword [rax+0x28], edx
+00000001000623aa         mov        qword [rax+0x20], rdi
+00000001000623ae         mov        rdi, rax                                    ; argument #1 for method sub_1000464bf
+00000001000623b1         call       sub_1000464bf                               ; sub_1000464bf
+00000001000623b6         add        rsp, 0x30
+00000001000623ba         pop        rbp
+00000001000623bb         ret
+                        ; endp
+
+        ; ================ B E G I N N I N G   O F   P R O C E D U R E ================
+
+
+                     -[LWScreenLock lockScreenImmediate]:
+0000000100062b97         push       rbp                                         ; Objective C Implementation defined at 0x100102990 (instance method), DATA XREF=0x100102990
+0000000100062b98         mov        rbp, rsp
+0000000100062b9b         mov        rsi, qword [0x10010f660]                    ; @selector(lockScreenImmediateUsingShortTimeout:)
+0000000100062ba2         xor        edx, edx
+0000000100062ba4         pop        rbp
+0000000100062ba5         jmp        qword [_objc_msgSend_1000ef540]             ; _objc_msgSend, _objc_msgSend_1000ef540
+                        ; endp
+
+        ; Variables:
+        ;    var_30: int8_t, -48
+
+
+                     -[LWScreenLock setScreenIsLocked:]:
+000000010002acc8         push       rbp                                         ; Objective C Implementation defined at 0x1001029f0 (instance method), DATA XREF=0x1001029f0
+000000010002acc9         mov        rbp, rsp
+000000010002accc         sub        rsp, 0x30
+000000010002acd0         mov        rcx, qword [__NSConcreteStackBlock_1000ef1c8] ; __NSConcreteStackBlock_1000ef1c8
+000000010002acd7         lea        rax, qword [rbp+var_30]
+000000010002acdb         mov        qword [rax], rcx
+000000010002acde         mov        ecx, 0xc2000000
+000000010002ace3         mov        qword [rax+8], rcx
+000000010002ace7         lea        rcx, qword [sub_1000631ba]                  ; sub_1000631ba
+000000010002acee         mov        qword [rax+0x10], rcx
+000000010002acf2         lea        rcx, qword [qword_value_4295888224+1040]    ; 0x1000f1670
+000000010002acf9         mov        qword [rax+0x18], rcx
+000000010002acfd         mov        byte [rax+0x28], dl
+000000010002ad00         mov        qword [rax+0x20], rdi
+000000010002ad04         mov        rdi, rax                                    ; argument #1 for method sub_1000464bf
+000000010002ad07         call       sub_1000464bf                               ; sub_1000464bf
+000000010002ad0c         add        rsp, 0x30
+000000010002ad10         pop        rbp
+000000010002ad11         ret
+                        ; endp
+
+        ; Variables:
+        ;    var_30: int64_t, -48
+        ;    var_40: int8_t, -64
+        ;    var_70: int8_t, -112
+
+                     -[LWScreenLock lockScreenImmediateUsingShortTimeout:]:
+0000000100062bab         push       rbp                                         ; Objective C Implementation defined at 0x1001029a8 (instance method), DATA XREF=0x1001029a8
+0000000100062bac         mov        rbp, rsp
+0000000100062baf         push       r15
+0000000100062bb1         push       r14
+0000000100062bb3         push       r13
+0000000100062bb5         push       r12
+0000000100062bb7         push       rbx
+0000000100062bb8         sub        rsp, 0x48
+0000000100062bbc         mov        r15d, edx
+0000000100062bbf         mov        r14, rdi
+0000000100062bc2         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0
+0000000100062bc9         mov        rax, qword [rax]
+0000000100062bcc         mov        qword [rbp+var_30], rax
+0000000100062bd0         lea        r13, qword [qword_100113d08+8]              ; 0x100113d10
+0000000100062bd7         mov        rdi, qword [r13]                            ; argument #1 for method sub_100056b7e
+0000000100062bdb         call       sub_100056b7e                               ; sub_100056b7e
+0000000100062be0         mov        rbx, rax
+0000000100062be3         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100062be5         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100062be8         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100062bed         test       al, al
+0000000100062bef         je         loc_100062c25
+
+0000000100062bf1         lea        r8, qword [rbp+var_40]
+0000000100062bf5         mov        dword [r8], 0x8200102
+0000000100062bfc         lea        rax, qword [aLwscreenlockLo]                ; "-[LWScreenLock lockScreenImmediateUsingShortTimeout:]"
+0000000100062c03         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100062c07         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100062c0e         lea        rcx, qword [aSEnter]                        ; argument "format" for method imp___stubs___os_log_impl, "%s | enter"
+0000000100062c15         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100062c17         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100062c1d         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100062c20         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100062c25:
+0000000100062c25         lea        rax, qword [qword_100114290]                ; qword_100114290, CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+68
+0000000100062c2c         mov        rdi, qword [rax]
+0000000100062c2f         mov        rsi, qword [0x10010e1b0]                    ; @selector(loginInstance)
+0000000100062c36         mov        rbx, qword [_objc_msgSend_1000ef540]        ; _objc_msgSend_1000ef540
+0000000100062c3d         call       rbx
+0000000100062c3f         mov        rsi, qword [0x10010e598]                    ; @selector(isGuestAccount)
+0000000100062c46         mov        rdi, rax
+0000000100062c49         call       rbx
+0000000100062c4b         test       al, al
+0000000100062c4d         je         loc_100062cac
+
+0000000100062c4f         lea        rax, qword [qword_100113d08+16]             ; 0x100113d18
+0000000100062c56         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+0000000100062c59         call       sub_100056b7e                               ; sub_100056b7e
+0000000100062c5e         mov        rbx, rax
+0000000100062c61         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100062c63         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100062c66         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100062c6b         test       al, al
+0000000100062c6d         je         loc_100062db7
+
+0000000100062c73         lea        r8, qword [rbp+var_40]
+0000000100062c77         mov        dword [r8], 0x8200102
+0000000100062c7e         lea        rax, qword [aLwscreenlockLo]                ; "-[LWScreenLock lockScreenImmediateUsingShortTimeout:]"
+0000000100062c85         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100062c89         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100062c90         lea        rcx, qword [aSErrorLockscre]                ; argument "format" for method imp___stubs___os_log_impl, "%s | ERROR | lockScreenImmediate: attempt to lock the screen on a guest account"
+0000000100062c97         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100062c99         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100062c9f         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100062ca2         call       imp___stubs___os_log_impl                   ; _os_log_impl
+0000000100062ca7         jmp        loc_100062db7
+
+                     loc_100062cac:
+0000000100062cac         mov        rax, qword [objc_ivar_offset_LWScreenLock__screenLockImmediateIsActive] ; objc_ivar_offset_LWScreenLock__screenLockImmediateIsActive, CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+162
+0000000100062cb3         mov        byte [r14+rax], 0x1
+0000000100062cb8         mov        rax, qword [__NSConcreteStackBlock_1000ef1c8] ; __NSConcreteStackBlock_1000ef1c8
+0000000100062cbf         lea        rdi, qword [rbp+var_70]
+0000000100062cc3         mov        qword [rdi], rax
+0000000100062cc6         mov        eax, 0xc2000000
+0000000100062ccb         mov        qword [rdi+8], rax
+0000000100062ccf         lea        rax, qword [sub_100062e1c]                  ; sub_100062e1c
+0000000100062cd6         mov        qword [rdi+0x10], rax
+0000000100062cda         lea        rax, qword [qword_value_4295888224+1040]    ; 0x1000f1670
+0000000100062ce1         mov        qword [rdi+0x18], rax
+0000000100062ce5         mov        qword [rdi+0x20], r14
+0000000100062ce9         mov        byte [rdi+0x28], r15b                       ; argument #1 for method sub_1000464bf
+0000000100062ced         call       sub_1000464bf                               ; sub_1000464bf
+0000000100062cf2         mov        rdi, qword [objc_cls_ref_NSUserDefaults]    ; objc_cls_ref_NSUserDefaults
+0000000100062cf9         mov        rsi, qword [0x10010e098]                    ; @selector(standardUserDefaults)
+0000000100062d00         call       rbx
+0000000100062d02         mov        rsi, qword [0x10010e800]                    ; @selector(boolForKey:)
+0000000100062d09         lea        rdx, qword [cfstring_immediateLockLaunchesScreenSaver] ; @"immediateLockLaunchesScreenSaver"
+0000000100062d10         mov        rdi, rax
+0000000100062d13         call       rbx
+0000000100062d15         test       al, al
+0000000100062d17         je         loc_100062d3a
+
+                     loc_100062d19:
+0000000100062d19         mov        rdi, qword [objc_cls_ref_ScreenSaverDaemon] ; objc_cls_ref_ScreenSaverDaemon, CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+557, -[LWScreenLock lockScreenImmediateUsingShortTimeout:]+615
+0000000100062d20         mov        rsi, qword [0x10010de10]                    ; @selector(sharedScreenSaverDaemon)
+0000000100062d27         call       rbx
+0000000100062d29         mov        rsi, qword [0x10010f9a0]                    ; @selector(screenSaverStartNow:)
+0000000100062d30         mov        edx, 0x1
+0000000100062d35         mov        rdi, rax
+0000000100062d38         jmp        loc_100062db5
+
+                     loc_100062d3a:
+0000000100062d3a         call       sub_100044a47                               ; sub_100044a47, CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+364
+0000000100062d3f         mov        r12d, eax
+0000000100062d42         mov        rdi, qword [r13]                            ; argument #1 for method sub_100056b7e
+0000000100062d46         call       sub_100056b7e                               ; sub_100056b7e
+0000000100062d4b         mov        r15, rax
+0000000100062d4e         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100062d50         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100062d53         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100062d58         test       r12b, r12b
+0000000100062d5b         je         loc_100062dd6
+
+0000000100062d5d         test       al, al
+0000000100062d5f         je         loc_100062d95
+
+0000000100062d61         lea        r8, qword [rbp+var_40]
+0000000100062d65         mov        dword [r8], 0x8200102
+0000000100062d6c         lea        rax, qword [aLwscreenlockLo]                ; "-[LWScreenLock lockScreenImmediateUsingShortTimeout:]"
+0000000100062d73         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100062d77         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100062d7e         lea        rcx, qword [aSStartingADire]                ; argument "format" for method imp___stubs___os_log_impl, "%s |    starting a direct lock from lock immediate"
+0000000100062d85         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100062d87         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100062d8d         mov        rsi, r15                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100062d90         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100062d95:
+0000000100062d95         mov        rsi, qword [0x10010e1d0]                    ; @selector(enqueueLockScreenRequestedBy:), CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+436
+0000000100062d9c         mov        edx, 0x7
+0000000100062da1         mov        rdi, r14
+0000000100062da4         call       rbx
+0000000100062da6         mov        rsi, qword [0x10010e1d8]                    ; @selector(enqueueUnlockScreenRequestedBy:)
+0000000100062dad         mov        edx, 0x7
+0000000100062db2         mov        rdi, r14
+
+                     loc_100062db5:
+0000000100062db5         call       rbx                                         ; CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+397
+
+                     loc_100062db7:
+0000000100062db7         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0, CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+194, -[LWScreenLock lockScreenImmediateUsingShortTimeout:]+252
+0000000100062dbe         mov        rax, qword [rax]
+0000000100062dc1         cmp        rax, qword [rbp+var_30]
+0000000100062dc5         jne        loc_100062e17
+
+0000000100062dc7         add        rsp, 0x48
+0000000100062dcb         pop        rbx
+0000000100062dcc         pop        r12
+0000000100062dce         pop        r13
+0000000100062dd0         pop        r14
+0000000100062dd2         pop        r15
+0000000100062dd4         pop        rbp
+0000000100062dd5         ret
+                        ; endp
+
+                     loc_100062dd6:
+0000000100062dd6         test       al, al                                      ; CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+432
+0000000100062dd8         je         loc_100062d19
+
+0000000100062dde         lea        r8, qword [rbp+var_40]
+0000000100062de2         mov        dword [r8], 0x8200102
+0000000100062de9         lea        rax, qword [aLwscreenlockLo]                ; "-[LWScreenLock lockScreenImmediateUsingShortTimeout:]"
+0000000100062df0         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100062df4         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100062dfb         lea        rcx, qword [aSSessionIsNotO_1000c6c10]      ; argument "format" for method imp___stubs___os_log_impl, "%s | Session is not on console, launch screen saver instead of sleeping the display"
+0000000100062e02         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100062e04         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100062e0a         mov        rsi, r15                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100062e0d         call       imp___stubs___os_log_impl                   ; _os_log_impl
+0000000100062e12         jmp        loc_100062d19
+
+                     loc_100062e17:
+0000000100062e17         call       imp___stubs____stack_chk_fail               ; __stack_chk_fail, CODE XREF=-[LWScreenLock lockScreenImmediateUsingShortTimeout:]+538
+                        ; endp
+
+lldb changes suggested by ChatGPT:
+
+Patch 1: (didn't work)
+
+expr *(uint8_t*)0x1093ccda0 = 0x4c
+expr *(uint8_t*)0x1093ccda1 = 0x89
+expr *(uint8_t*)0x1093ccda2 = 0xf7
+expr *(uint8_t*)0x1093ccda3 = 0xff
+expr *(uint8_t*)0x1093ccda4 = 0xd3
+expr *(uint8_t*)0x1093ccda5 = 0x48
+expr *(uint8_t*)0x1093ccda6 = 0x8b
+expr *(uint8_t*)0x1093ccda7 = 0x35
+expr *(uint8_t*)0x1093ccda8 = 0x2b
+expr *(uint8_t*)0x1093ccda9 = 0xb4
+expr *(uint8_t*)0x1093ccdaa = 0x0a
+expr *(uint8_t*)0x1093ccdab = 0x00
+expr *(uint8_t*)0x1093ccdac = 0xba
+expr *(uint8_t*)0x1093ccdad = 0x07
+expr *(uint8_t*)0x1093ccdae = 0x00
+expr *(uint8_t*)0x1093ccdaf = 0x00
+
+Patch 2: (blocked screensaver entirely, but killed the screen lock on display sleep)
+
+expr *(uint8_t*)0x1093ccd95 = 0x48
+expr *(uint8_t*)0x1093ccd96 = 0x8b
+expr *(uint8_t*)0x1093ccd97 = 0x35
+expr *(uint8_t*)0x1093ccd98 = 0x34
+expr *(uint8_t*)0x1093ccd99 = 0xb4
+expr *(uint8_t*)0x1093ccd9a = 0x0a
+expr *(uint8_t*)0x1093ccd9b = 0x00
+expr *(uint8_t*)0x1093ccd9c = 0xba
+expr *(uint8_t*)0x1093ccd9d = 0x07
+expr *(uint8_t*)0x1093ccd9e = 0x00
+expr *(uint8_t*)0x1093ccd9f = 0x00
+expr *(uint8_t*)0x1093ccda0 = 0x00
+expr *(uint8_t*)0x1093ccda1 = 0x4c
+expr *(uint8_t*)0x1093ccda2 = 0x89
+expr *(uint8_t*)0x1093ccda3 = 0xf7
+expr *(uint8_t*)0x1093ccda4 = 0xff
+expr *(uint8_t*)0x1093ccda5 = 0xd3
+expr *(uint8_t*)0x1093ccda6 = 0x48
+expr *(uint8_t*)0x1093ccda7 = 0x8b
+expr *(uint8_t*)0x1093ccda8 = 0x35
+expr *(uint8_t*)0x1093ccda9 = 0x2b
+expr *(uint8_t*)0x1093ccdaa = 0xb4
+expr *(uint8_t*)0x1093ccdab = 0x0a
+expr *(uint8_t*)0x1093ccdac = 0x00
+expr *(uint8_t*)0x1093ccdad = 0xba
+expr *(uint8_t*)0x1093ccdae = 0x07
+expr *(uint8_t*)0x1093ccdaf = 0x00
+expr *(uint8_t*)0x1093ccdb0 = 0x00
+expr *(uint8_t*)0x1093ccdb1 = 0x00
+expr *(uint8_t*)0x1093ccdb2 = 0x4c
+expr *(uint8_t*)0x1093ccdb3 = 0x89
+expr *(uint8_t*)0x1093ccdb4 = 0xf7
+expr *(uint8_t*)0x1093ccdb5 = 0xff
+
+
+
+---
+# macOS Lock / Screensaver Patch Log
+
+## **1. Memory Range 0x1093ccd95 – 0x1093ccda5**
+
+* **Original bytes:**
+
+```
+0x1093ccd95: 48 8b 35 34 b4 0a 00 ba 07 00 00 00 4c 89 f7 ff
+0x1093ccda5: d3 48 8b 35 2b b4 0a 00 ba 07 00 00 00 4c 89 f7
+```
+
+* **Purpose:** Attempt to patch an intermediate method (likely lock path)
+* **Operations done:**
+
+  * Tried multiple `memory write` commands
+  * Used `expr *(uint8_t*)ADDR = VALUE` to avoid shifting duplicates
+* **Outcome:** Duplication issues occurred (`48` repeated). Not the final solution; partial patching only.
+
+---
+
+## **2. Memory Range 0x1093ccda0 – 0x1093ccda7**
+
+* **Patched bytes via `expr` one by one:**
+
+```
+0x1093ccda0: 4c 89 f7 ff d3 48 8b 35
+```
+
+* **Purpose:** Restore original instruction pattern without duplicates
+* **Outcome:** Fixed shifted duplicates from prior attempts, but did not block lock on its own.
+
+---
+
+## **3. Memory Range 0x1093ccd10**
+
+* **Original bytes:**
+
+```
+0x1093ccd10: 48 89 c7 ff d3 30 c0 74 21 48 8b 3d a0 e0 0a 00
+```
+
+* **Attempted patch:**
+
+```
+expr *(uint8_t*)0x1093ccd10 = 0x30
+expr *(uint8_t*)0x1093ccd11 = 0xC0
+```
+
+* **Result:** Tested → did **not prevent immediate lock**. Patch ineffective.
+
+---
+
+## **4. Memory Range 0x1093ccdb0 – 0x1093ccdb7**
+
+* **Observed bytes:**
+
+```
+0x1093ccdb0: 00 00 4c 89 f7 90 90 48
+```
+
+* **Patch applied:** Replaced 0x90 NOPs to prevent hot corner screensaver lock
+* **Outcome:**
+
+  * Hot corner no longer triggers the screensaver
+  * Display sleep still occurs but **lock/password no longer triggers**
+  * Partial success; screensaver function altered
+
+---
+
+## **5. Observations / Notes**
+
+* **Display sleep** path and **screensaver** path are separate; previous edits only partially disabled locking.
+* The **real control point** is the lock flag in:
+
+```
+-[LWScreenLock setScreenIsLocked:]  → byte at [rax+0x28]
+```
+
+* Runtime patching recommendation:
+
+```lldb
+expr *(uint8_t*)ADDR = 0x00
+```
+
+This forces lock state = 0, letting all paths (screensaver, sleep, hot corner) run without triggering immediate lock.
+
+---
+
+## **6. Summary of Lessons Learned**
+
+1. Mid-method instruction patches shift bytes if not applied carefully → always use per-byte `expr` writes.
+2. Hot corner triggers screensaver → different path than display sleep → patching only one path leaves other behaviors intact.
+3. Final authoritative patch must target **lock state variable** instead of intermediate instructions.
+4. Use this file as the canonical reference for scripting LaunchAgent/Daemon patches.
+
+---

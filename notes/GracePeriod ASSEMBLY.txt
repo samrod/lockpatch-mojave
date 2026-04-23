@@ -1,0 +1,1065 @@
+You already helped me successfully patch a Mojave loginwindow.app bug where the lock screen checkbox and delay settings are ignored and the screen is locked immediately when sleep or screen saver begin. This fix fully disables locking entirely, which is suboptimal. I suspect this bug exists only on Intel T2 Macs that have reverted to Mojave after upgrades to newer versions of macOS may have mofied the firmware. 
+
+We'd like to read the user's delay selection: 0, 5s, 1m, 5m, 15m, 1h, 4h, 8h, never (set to the highest 32bit value).
+
+
+To do this, we must identify the memory address that stores the screen lock gracePeriod. This is set in System Preferences > Security & Privacy > General > "Require password [gracePeriod] after sleep or screen saver begins". We don't want to key off events that may not fire in a particular session.
+
+The intended platform is only Mojave on x86_64 with T2 chips. The reason we need to read the lock gracePeriod is :
+
+Console log filtered on "loginwindow" as I change the gracePeriod delay to 5 minutes (300s):
+default	19:34:30.010531 -0700	loginwindow	-[SessionAgentCom SACScreenLockPreferencesChanged:] | Enter,   sent by pid: 3080, name: com.apple.preference.security.remoteservice (System Preferences)
+default	19:34:30.010562 -0700	loginwindow	-[LWKeybagSupport configGracePeriodIfNeeded] | enter
+default	19:34:30.010580 -0700	loginwindow	-[LWKeybagSupport gracePeriod] | enter
+default	19:34:30.012785 -0700	loginwindow	MKBGetDeviceConfigurations: aks_get_configuration result: 0
+default	19:34:30.012824 -0700	loginwindow	-[LWKeybagSupport gracePeriod] |   returning: 300
+default	19:34:30.012860 -0700	loginwindow	-[LWKeybagSupport configGracePeriodIfNeeded] | current keybag graceperiod setting: 300
+default	19:34:30.012890 -0700	loginwindow	-[Login1 isGuestAccount] | enter
+default	19:34:30.012912 -0700	loginwindow	-[Login1 isGuestAccount] | isGuestAccount returning = 0
+default	19:34:30.012938 -0700	loginwindow	-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:] | Enter
+default	19:34:30.013574 -0700	loginwindow	MKBGetDeviceConfigurations: aks_get_configuration result: 0
+default	19:34:30.013603 -0700	loginwindow	-[LWKeybagSupport deviceConfigurationFlagsFrom:flags:] | Enter
+default	19:34:30.013625 -0700	loginwindow	-[LWKeybagSupport deviceConfigurationFlagsFrom:flags:] | returning flags:1, foundAndValid: 1
+default	19:34:30.013643 -0700	loginwindow	-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:] | kMKBConfigFlagGracePeriodSet flag found, do not migrate lock pref settings
+default	19:34:30.013660 -0700	loginwindow	-[LWKeybagSupport configGracePeriodIfNeeded] |      no grace period changes needed
+default	19:34:30.014161 -0700	loginwindow	-[LWScreenLock readAskForPasswordSettings] | askForPassword being set to YES (always), passwordDelay = 300
+default	19:34:30.014178 -0700	loginwindow	-[LWScreenLock setScreenLockDefaultDelay:] | setScreenLockDefaultDelay to: 300
+default	19:36:35.664273 -0700	loginwindow	-[ApplicationManager checkInAppContext:refCon:eventData:] | enter
+default	19:36:35.666195 -0700	loginwindow	-[ApplicationManager checkInAppContext:refCon:eventData:] |      checked in app : Legacy Color Picker Extensions
+
+
+Relevant Hopper dissassembled code:
+
+        ; ================ B E G I N N I N G   O F   P R O C E D U R E ================
+
+        ; Variables:
+        ;    var_20: int64_t, -32
+        ;    var_40: int8_t, -64
+        ;    var_44: int32_t, -68
+
+
+                     -[LWKeybagSupport gracePeriod]:
+0000000100058ade         push       rbp                                         ; Objective C Implementation defined at 0x100100b30 (instance method), DATA XREF=0x100100b30
+0000000100058adf         mov        rbp, rsp
+0000000100058ae2         push       r15
+0000000100058ae4         push       r14
+0000000100058ae6         push       rbx
+0000000100058ae7         sub        rsp, 0x38
+0000000100058aeb         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0
+0000000100058af2         mov        rax, qword [rax]
+0000000100058af5         mov        qword [rbp+var_20], rax
+0000000100058af9         mov        dword [rbp+var_44], 0x0
+0000000100058b00         lea        r15, qword [qword_100113d08+8]              ; 0x100113d10
+0000000100058b07         mov        rdi, qword [r15]                            ; argument #1 for method sub_100056b7e
+0000000100058b0a         call       sub_100056b7e                               ; sub_100056b7e
+0000000100058b0f         mov        rbx, rax
+0000000100058b12         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100058b14         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100058b17         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100058b1c         test       al, al
+0000000100058b1e         je         loc_100058b54
+
+0000000100058b20         lea        r8, qword [rbp+var_40]
+0000000100058b24         mov        dword [r8], 0x8200102
+0000000100058b2b         lea        rax, qword [aLwkeybagsuppor_1000e14e5]      ; "-[LWKeybagSupport gracePeriod]"
+0000000100058b32         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100058b36         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100058b3d         lea        rcx, qword [aSEnter]                        ; argument "format" for method imp___stubs___os_log_impl, "%s | enter"
+0000000100058b44         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100058b46         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100058b4c         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100058b4f         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100058b54:
+0000000100058b54         xor        edi, edi                                    ; CODE XREF=-[LWKeybagSupport gracePeriod]+64
+0000000100058b56         call       imp___stubs__MKBDeviceGetGracePeriod        ; MKBDeviceGetGracePeriod
+0000000100058b5b         test       rax, rax
+0000000100058b5e         je         loc_100058bf8
+
+0000000100058b64         mov        rbx, rax
+0000000100058b67         mov        rax, qword [_kMKBConfigGracePeriod_1000ef450] ; _kMKBConfigGracePeriod_1000ef450
+0000000100058b6e         mov        rsi, qword [rax]                            ; argument "key" for method imp___stubs__CFDictionaryGetValue
+0000000100058b71         mov        rdi, rbx                                    ; argument "theDict" for method imp___stubs__CFDictionaryGetValue
+0000000100058b74         call       imp___stubs__CFDictionaryGetValue           ; CFDictionaryGetValue
+0000000100058b79         test       rax, rax
+0000000100058b7c         je         loc_100058bee
+
+0000000100058b7e         lea        rdx, qword [rbp+var_44]                     ; argument "valuePtr" for method imp___stubs__CFNumberGetValue
+0000000100058b82         mov        esi, 0x9                                    ; argument "theType" for method imp___stubs__CFNumberGetValue
+0000000100058b87         mov        rdi, rax                                    ; argument "number" for method imp___stubs__CFNumberGetValue
+0000000100058b8a         call       imp___stubs__CFNumberGetValue               ; CFNumberGetValue
+0000000100058b8f         test       al, al
+0000000100058b91         jne        loc_100058bee
+
+0000000100058b93         lea        rax, qword [qword_100113d08+16]             ; 0x100113d18
+0000000100058b9a         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+0000000100058b9d         call       sub_100056b7e                               ; sub_100056b7e
+0000000100058ba2         mov        r14, rax
+0000000100058ba5         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100058ba7         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100058baa         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100058baf         test       al, al
+0000000100058bb1         je         loc_100058be7
+
+0000000100058bb3         lea        r8, qword [rbp+var_40]
+0000000100058bb7         mov        dword [r8], 0x8200102
+0000000100058bbe         lea        rax, qword [aLwkeybagsuppor_1000e14e5]      ; "-[LWKeybagSupport gracePeriod]"
+0000000100058bc5         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100058bc9         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100058bd0         lea        rcx, qword [aSErrorUnableTo_1000c3160]      ; argument "format" for method imp___stubs___os_log_impl, "%s | ERROR | Unable to get grace period int value"
+0000000100058bd7         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100058bd9         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100058bdf         mov        rsi, r14                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100058be2         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100058be7:
+0000000100058be7         mov        dword [rbp+var_44], 0x0                     ; CODE XREF=-[LWKeybagSupport gracePeriod]+211
+
+                     loc_100058bee:
+0000000100058bee         mov        rdi, rbx                                    ; argument "cf" for method imp___stubs__CFRelease, CODE XREF=-[LWKeybagSupport gracePeriod]+158, -[LWKeybagSupport gracePeriod]+179
+0000000100058bf1         call       imp___stubs__CFRelease                      ; CFRelease
+0000000100058bf6         jmp        loc_100058c4c
+
+                     loc_100058bf8:
+0000000100058bf8         lea        rax, qword [qword_100113d08+16]             ; 0x100113d18, CODE XREF=-[LWKeybagSupport gracePeriod]+128
+0000000100058bff         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+0000000100058c02         call       sub_100056b7e                               ; sub_100056b7e
+0000000100058c07         mov        rbx, rax
+0000000100058c0a         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100058c0c         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100058c0f         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100058c14         test       al, al
+0000000100058c16         je         loc_100058c4c
+
+0000000100058c18         lea        r8, qword [rbp+var_40]
+0000000100058c1c         mov        dword [r8], 0x8200102
+0000000100058c23         lea        rax, qword [aLwkeybagsuppor_1000e14e5]      ; "-[LWKeybagSupport gracePeriod]"
+0000000100058c2a         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100058c2e         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100058c35         lea        rcx, qword [aSErrorGracePer]                ; argument "format" for method imp___stubs___os_log_impl, "%s | ERROR | Grace period dictionary is NULL"
+0000000100058c3c         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100058c3e         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100058c44         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100058c47         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100058c4c:
+0000000100058c4c         mov        rdi, qword [r15]                            ; argument #1 for method sub_100056b7e, CODE XREF=-[LWKeybagSupport gracePeriod]+280, -[LWKeybagSupport gracePeriod]+312
+0000000100058c4f         call       sub_100056b7e                               ; sub_100056b7e
+0000000100058c54         mov        rbx, rax
+0000000100058c57         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100058c59         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100058c5c         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100058c61         test       al, al
+0000000100058c63         je         loc_100058ca7
+
+0000000100058c65         mov        eax, dword [rbp+var_44]
+0000000100058c68         lea        r8, qword [rbp+var_40]
+0000000100058c6c         mov        dword [r8], 0x8200202
+0000000100058c73         lea        rcx, qword [aLwkeybagsuppor_1000e14e5]      ; "-[LWKeybagSupport gracePeriod]"
+0000000100058c7a         mov        qword [r8+4], rcx
+0000000100058c7e         mov        word [r8+0xc], 0x400
+0000000100058c85         mov        dword [r8+0xe], eax                         ; argument "buf" for method imp___stubs___os_log_impl
+0000000100058c89         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100058c90         lea        rcx, qword [aSReturningD_1000ba740]         ; argument "format" for method imp___stubs___os_log_impl, "%s |   returning: %d"
+0000000100058c97         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100058c99         mov        r9d, 0x12                                   ; argument "size" for method imp___stubs___os_log_impl
+0000000100058c9f         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100058ca2         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100058ca7:
+0000000100058ca7         mov        eax, dword [rbp+var_44]                     ; CODE XREF=-[LWKeybagSupport gracePeriod]+389
+0000000100058caa         mov        rcx, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0
+0000000100058cb1         mov        rcx, qword [rcx]
+0000000100058cb4         cmp        rcx, qword [rbp+var_20]
+0000000100058cb8         jne        loc_100058cc5
+
+0000000100058cba         add        rsp, 0x38
+0000000100058cbe         pop        rbx
+0000000100058cbf         pop        r14
+0000000100058cc1         pop        r15
+0000000100058cc3         pop        rbp
+0000000100058cc4         ret
+                        ; endp
+
+                     loc_100058cc5:
+0000000100058cc5         call       imp___stubs____stack_chk_fail               ; __stack_chk_fail, CODE XREF=-[LWKeybagSupport gracePeriod]+474
+                        ; endp
+
+        ; ================ B E G I N N I N G   O F   P R O C E D U R E ================
+
+        ; Variables:
+        ;    var_28: int64_t, -40
+        ;    var_40: int8_t, -64
+
+
+                     -[LWKeybagSupport setGracePeriod:]:
+000000010005a9d1         push       rbp                                         ; Objective C Implementation defined at 0x100100cc8 (instance method), DATA XREF=0x100100cc8
+000000010005a9d2         mov        rbp, rsp
+000000010005a9d5         push       r15
+000000010005a9d7         push       r14
+000000010005a9d9         push       r12
+000000010005a9db         push       rbx
+000000010005a9dc         sub        rsp, 0x20
+000000010005a9e0         mov        r14d, edx
+000000010005a9e3         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0
+000000010005a9ea         mov        rax, qword [rax]
+000000010005a9ed         mov        qword [rbp+var_28], rax
+000000010005a9f1         lea        r12, qword [qword_100113d08+8]              ; 0x100113d10
+000000010005a9f8         mov        rdi, qword [r12]                            ; argument #1 for method sub_100056b7e
+000000010005a9fc         call       sub_100056b7e                               ; sub_100056b7e
+000000010005aa01         mov        rbx, rax
+000000010005aa04         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+000000010005aa06         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+000000010005aa09         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+000000010005aa0e         test       al, al
+000000010005aa10         je         loc_10005aa46
+
+000000010005aa12         lea        r8, qword [rbp+var_40]
+000000010005aa16         mov        dword [r8], 0x8200102
+000000010005aa1d         lea        rax, qword [aLwkeybagsuppor_1000e18b3]      ; "-[LWKeybagSupport setGracePeriod:]"
+000000010005aa24         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+000000010005aa28         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+000000010005aa2f         lea        rcx, qword [aSEnter]                        ; argument "format" for method imp___stubs___os_log_impl, "%s | enter"
+000000010005aa36         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+000000010005aa38         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+000000010005aa3e         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+000000010005aa41         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_10005aa46:
+000000010005aa46         mov        rbx, qword [objc_cls_ref_NSDictionary]      ; objc_cls_ref_NSDictionary, CODE XREF=-[LWKeybagSupport setGracePeriod:]+63
+000000010005aa4d         mov        rdi, qword [objc_cls_ref_NSNumber]          ; objc_cls_ref_NSNumber
+000000010005aa54         mov        rsi, qword [0x10010e060]                    ; @selector(numberWithInt:)
+000000010005aa5b         mov        r15, qword [_objc_msgSend_1000ef540]        ; _objc_msgSend_1000ef540
+000000010005aa62         mov        edx, r14d
+000000010005aa65         call       r15
+000000010005aa68         mov        rsi, qword [0x10010f2e0]                    ; @selector(dictionaryWithObject:forKey:)
+000000010005aa6f         lea        rcx, qword [cfstring_GracePeriod]           ; @"GracePeriod"
+000000010005aa76         mov        rdi, rbx
+000000010005aa79         mov        rdx, rax
+000000010005aa7c         call       r15
+000000010005aa7f         test       rax, rax
+000000010005aa82         je         loc_10005abdf
+
+000000010005aa88         mov        rbx, rax
+000000010005aa8b         mov        rdi, qword [r12]                            ; argument #1 for method sub_100056b7e
+000000010005aa8f         call       sub_100056b7e                               ; sub_100056b7e
+000000010005aa94         mov        r15, rax
+000000010005aa97         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+000000010005aa99         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+000000010005aa9c         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+000000010005aaa1         cmp        r14d, 0x7fffffff
+000000010005aaa8         jne        loc_10005aadc
+
+000000010005aaaa         test       al, al
+000000010005aaac         je         loc_10005ab1f
+
+000000010005aaae         lea        r8, qword [rbp+var_40]
+000000010005aab2         mov        dword [r8], 0x8200102
+000000010005aab9         lea        rax, qword [aLwkeybagsuppor_1000e18b3]      ; "-[LWKeybagSupport setGracePeriod:]"
+000000010005aac0         mov        qword [r8+4], rax
+000000010005aac4         lea        rdi, qword [__mh_execute_header]            ; __mh_execute_header
+000000010005aacb         lea        rcx, qword [aSSettingGraceP_1000c3900]      ; "%s |      setting grace period to INT_MAX"
+000000010005aad2         xor        edx, edx
+000000010005aad4         mov        r9d, 0xc
+000000010005aada         jmp        loc_10005ab17
+
+                     loc_10005aadc:
+000000010005aadc         test       al, al                                      ; CODE XREF=-[LWKeybagSupport setGracePeriod:]+215
+000000010005aade         je         loc_10005ab1f
+
+000000010005aae0         lea        r8, qword [rbp+var_40]
+000000010005aae4         mov        dword [r8], 0x8200202
+000000010005aaeb         lea        rax, qword [aLwkeybagsuppor_1000e18b3]      ; "-[LWKeybagSupport setGracePeriod:]"
+000000010005aaf2         mov        qword [r8+4], rax
+000000010005aaf6         mov        word [r8+0xc], 0x400
+000000010005aafd         mov        dword [r8+0xe], r14d                        ; argument "buf" for method imp___stubs___os_log_impl
+000000010005ab01         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+000000010005ab08         lea        rcx, qword [aSSettingGraceP_1000c3930]      ; argument "format" for method imp___stubs___os_log_impl, "%s |      setting grace period to: %d"
+000000010005ab0f         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+000000010005ab11         mov        r9d, 0x12                                   ; argument "size" for method imp___stubs___os_log_impl
+
+                     loc_10005ab17:
+000000010005ab17         mov        rsi, r15                                    ; argument "log" for method imp___stubs___os_log_impl, CODE XREF=-[LWKeybagSupport setGracePeriod:]+265
+000000010005ab1a         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_10005ab1f:
+000000010005ab1f         xor        edi, edi                                    ; CODE XREF=-[LWKeybagSupport setGracePeriod:]+219, -[LWKeybagSupport setGracePeriod:]+269
+000000010005ab21         mov        rsi, rbx
+000000010005ab24         call       imp___stubs__MKBDeviceSetGracePeriod        ; MKBDeviceSetGracePeriod
+000000010005ab29         test       eax, eax
+000000010005ab2b         je         loc_10005abdf
+
+000000010005ab31         mov        ebx, eax
+000000010005ab33         lea        r15, qword [qword_100113d08+16]             ; 0x100113d18
+000000010005ab3a         mov        rdi, qword [r15]                            ; argument #1 for method sub_100056b7e
+000000010005ab3d         call       sub_100056b7e                               ; sub_100056b7e
+000000010005ab42         mov        r14, rax
+000000010005ab45         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+000000010005ab47         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+000000010005ab4a         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+000000010005ab4f         test       al, al
+000000010005ab51         je         loc_10005ab92
+
+000000010005ab53         lea        r8, qword [rbp+var_40]
+000000010005ab57         mov        dword [r8], 0x8200202
+000000010005ab5e         lea        rax, qword [aLwkeybagsuppor_1000e18b3]      ; "-[LWKeybagSupport setGracePeriod:]"
+000000010005ab65         mov        qword [r8+4], rax
+000000010005ab69         mov        word [r8+0xc], 0x400
+000000010005ab70         mov        dword [r8+0xe], ebx                         ; argument "buf" for method imp___stubs___os_log_impl
+000000010005ab74         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+000000010005ab7b         lea        rcx, qword [aSErrorAttemptT_1000c3960]      ; argument "format" for method imp___stubs___os_log_impl, "%s | ERROR | Attempt to set grace period failed, err: %d"
+000000010005ab82         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+000000010005ab84         mov        r9d, 0x12                                   ; argument "size" for method imp___stubs___os_log_impl
+000000010005ab8a         mov        rsi, r14                                    ; argument "log" for method imp___stubs___os_log_impl
+000000010005ab8d         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_10005ab92:
+000000010005ab92         mov        rdi, qword [r15]                            ; argument #1 for method sub_100056b7e, CODE XREF=-[LWKeybagSupport setGracePeriod:]+384
+000000010005ab95         call       sub_100056b7e                               ; sub_100056b7e
+000000010005ab9a         mov        rbx, rax
+000000010005ab9d         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+000000010005ab9f         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+000000010005aba2         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+000000010005aba7         test       al, al
+000000010005aba9         je         loc_10005abdf
+
+000000010005abab         lea        r8, qword [rbp+var_40]
+000000010005abaf         mov        dword [r8], 0x8200102
+000000010005abb6         lea        rax, qword [aLwkeybagsuppor_1000e18b3]      ; "-[LWKeybagSupport setGracePeriod:]"
+000000010005abbd         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+000000010005abc1         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+000000010005abc8         lea        rcx, qword [aSErrorKeybagSe]                ; argument "format" for method imp___stubs___os_log_impl, "%s | ERROR | Keybag settings will be wrong from here"
+000000010005abcf         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+000000010005abd1         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+000000010005abd7         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+000000010005abda         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_10005abdf:
+000000010005abdf         mov        rdi, qword [r12]                            ; argument #1 for method sub_100056b7e, CODE XREF=-[LWKeybagSupport setGracePeriod:]+177, -[LWKeybagSupport setGracePeriod:]+346, -[LWKeybagSupport setGracePeriod:]+472
+000000010005abe3         call       sub_100056b7e                               ; sub_100056b7e
+000000010005abe8         mov        rbx, rax
+000000010005abeb         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+000000010005abed         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+000000010005abf0         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+000000010005abf5         test       al, al
+000000010005abf7         je         loc_10005ac2d
+
+000000010005abf9         lea        r8, qword [rbp+var_40]
+000000010005abfd         mov        dword [r8], 0x8200102
+000000010005ac04         lea        rax, qword [aLwkeybagsuppor_1000e18b3]      ; "-[LWKeybagSupport setGracePeriod:]"
+000000010005ac0b         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+000000010005ac0f         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+000000010005ac16         lea        rcx, qword [aSExit_1000bb0a0]               ; argument "format" for method imp___stubs___os_log_impl, "%s | exit"
+000000010005ac1d         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+000000010005ac1f         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+000000010005ac25         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+000000010005ac28         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_10005ac2d:
+000000010005ac2d         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0, CODE XREF=-[LWKeybagSupport setGracePeriod:]+550
+000000010005ac34         mov        rax, qword [rax]
+000000010005ac37         cmp        rax, qword [rbp+var_28]
+000000010005ac3b         jne        loc_10005ac4a
+
+000000010005ac3d         add        rsp, 0x20
+000000010005ac41         pop        rbx
+000000010005ac42         pop        r12
+000000010005ac44         pop        r14
+000000010005ac46         pop        r15
+000000010005ac48         pop        rbp
+000000010005ac49         ret
+                        ; endp
+
+                     loc_10005ac4a:
+000000010005ac4a         call       imp___stubs____stack_chk_fail               ; __stack_chk_fail, CODE XREF=-[LWKeybagSupport setGracePeriod:]+618
+                        ; endp
+
+        ; ================ B E G I N N I N G   O F   P R O C E D U R E ================
+
+        ; Variables:
+        ;    var_30: int64_t, -48
+        ;    var_50: int8_t, -80
+        ;    var_54: int32_t, -84
+
+
+                     -[LWKeybagSupport configGracePeriodIfNeeded]:
+0000000100058743         push       rbp                                         ; Objective C Implementation defined at 0x100100b18 (instance method), DATA XREF=0x100100b18
+0000000100058744         mov        rbp, rsp
+0000000100058747         push       r15
+0000000100058749         push       r14
+000000010005874b         push       r13
+000000010005874d         push       r12
+000000010005874f         push       rbx
+0000000100058750         sub        rsp, 0x38
+0000000100058754         mov        r15, rdi
+0000000100058757         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0
+000000010005875e         mov        rax, qword [rax]
+0000000100058761         mov        qword [rbp+var_30], rax
+0000000100058765         lea        r13, qword [qword_100113d08+8]              ; 0x100113d10
+000000010005876c         mov        rdi, qword [r13]                            ; argument #1 for method sub_100056b7e
+0000000100058770         call       sub_100056b7e                               ; sub_100056b7e
+0000000100058775         mov        rbx, rax
+0000000100058778         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+000000010005877a         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+000000010005877d         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100058782         test       al, al
+0000000100058784         je         loc_1000587ba
+
+0000000100058786         lea        r8, qword [rbp+var_50]
+000000010005878a         mov        dword [r8], 0x8200102
+0000000100058791         lea        rax, qword [aLwkeybagsuppor]                ; "-[LWKeybagSupport configGracePeriodIfNeeded]"
+0000000100058798         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+000000010005879c         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+00000001000587a3         lea        rcx, qword [aSEnter]                        ; argument "format" for method imp___stubs___os_log_impl, "%s | enter"
+00000001000587aa         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+00000001000587ac         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+00000001000587b2         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+00000001000587b5         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_1000587ba:
+00000001000587ba         mov        rsi, qword [0x10010f2b8]                    ; @selector(gracePeriod), CODE XREF=-[LWKeybagSupport configGracePeriodIfNeeded]+65
+00000001000587c1         mov        r14, r15
+00000001000587c4         mov        rdi, r15
+00000001000587c7         call       qword [_objc_msgSend_1000ef540]             ; _objc_msgSend, _objc_msgSend_1000ef540
+00000001000587cd         mov        r12d, eax
+00000001000587d0         mov        rdi, qword [r13]                            ; argument #1 for method sub_100056b7e
+00000001000587d4         call       sub_100056b7e                               ; sub_100056b7e
+00000001000587d9         mov        rbx, rax
+00000001000587dc         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+00000001000587de         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+00000001000587e1         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+00000001000587e6         test       al, al
+00000001000587e8         je         loc_100058829
+
+00000001000587ea         lea        r8, qword [rbp+var_50]
+00000001000587ee         mov        dword [r8], 0x8200202
+00000001000587f5         lea        rax, qword [aLwkeybagsuppor]                ; "-[LWKeybagSupport configGracePeriodIfNeeded]"
+00000001000587fc         mov        qword [r8+4], rax
+0000000100058800         mov        word [r8+0xc], 0x400
+0000000100058807         mov        dword [r8+0xe], r12d                        ; argument "buf" for method imp___stubs___os_log_impl
+000000010005880b         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100058812         lea        rcx, qword [aSCurrentKeybag]                ; argument "format" for method imp___stubs___os_log_impl, "%s | current keybag graceperiod setting: %d"
+0000000100058819         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+000000010005881b         mov        r9d, 0x12                                   ; argument "size" for method imp___stubs___os_log_impl
+0000000100058821         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100058824         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100058829:
+0000000100058829         lea        r13, qword [qword_100114290]                ; qword_100114290, CODE XREF=-[LWKeybagSupport configGracePeriodIfNeeded]+165
+0000000100058830         mov        rdi, qword [r13]
+0000000100058834         mov        rbx, qword [0x10010e1b0]                    ; @selector(loginInstance)
+000000010005883b         mov        r15, qword [_objc_msgSend_1000ef540]        ; _objc_msgSend_1000ef540
+0000000100058842         mov        rsi, rbx
+0000000100058845         call       r15
+0000000100058848         mov        rsi, qword [0x10010e598]                    ; @selector(isGuestAccount)
+000000010005884f         mov        rdi, rax
+0000000100058852         call       r15
+0000000100058855         test       al, al
+0000000100058857         jne        loc_100058878
+
+0000000100058859         mov        rdi, qword [r13]
+000000010005885d         mov        rsi, rbx
+0000000100058860         call       r15
+0000000100058863         mov        rsi, qword [0x10010e2f0]                    ; @selector(isMBSetupUserAccount)
+000000010005886a         mov        rdi, rax
+000000010005886d         call       r15
+0000000100058870         test       al, al
+0000000100058872         je         loc_10005890d
+
+                     loc_100058878:
+0000000100058878         lea        rax, qword [qword_100113d08+8]              ; 0x100113d10, CODE XREF=-[LWKeybagSupport configGracePeriodIfNeeded]+276
+000000010005887f         mov        rdi, qword [rax]                            ; argument #1 for method sub_100056b7e
+0000000100058882         call       sub_100056b7e                               ; sub_100056b7e
+0000000100058887         mov        rbx, rax
+000000010005888a         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+000000010005888c         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+000000010005888f         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100058894         test       al, al
+0000000100058896         je         loc_1000588cc
+
+0000000100058898         lea        r8, qword [rbp+var_50]
+000000010005889c         mov        dword [r8], 0x8200102
+00000001000588a3         lea        rax, qword [aLwkeybagsuppor]                ; "-[LWKeybagSupport configGracePeriodIfNeeded]"
+00000001000588aa         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+00000001000588ae         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+00000001000588b5         lea        rcx, qword [aSSettingGraceP]                ; argument "format" for method imp___stubs___os_log_impl, "%s |      setting grace period to INT_MAX for guest account or mbsetupuser account"
+00000001000588bc         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+00000001000588be         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+00000001000588c4         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+00000001000588c7         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_1000588cc:
+00000001000588cc         mov        rsi, qword [0x10010f2c0]                    ; @selector(setGracePeriod:), CODE XREF=-[LWKeybagSupport configGracePeriodIfNeeded]+339
+00000001000588d3         mov        r12d, 0x7fffffff
+00000001000588d9         mov        edx, 0x7fffffff
+00000001000588de         mov        rdi, r14
+
+                     loc_1000588e1:
+00000001000588e1         call       qword [_objc_msgSend_1000ef540]             ; _objc_msgSend, _objc_msgSend_1000ef540, CODE XREF=-[LWKeybagSupport configGracePeriodIfNeeded]+848
+
+                     loc_1000588e7:
+00000001000588e7         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0, CODE XREF=-[LWKeybagSupport configGracePeriodIfNeeded]+855, -[LWKeybagSupport configGracePeriodIfNeeded]+913
+00000001000588ee         mov        rax, qword [rax]
+00000001000588f1         cmp        rax, qword [rbp+var_30]
+00000001000588f5         jne        loc_100058ad9
+
+00000001000588fb         mov        eax, r12d
+00000001000588fe         add        rsp, 0x38
+0000000100058902         pop        rbx
+0000000100058903         pop        r12
+0000000100058905         pop        r13
+0000000100058907         pop        r14
+0000000100058909         pop        r15
+000000010005890b         pop        rbp
+000000010005890c         ret
+                        ; endp
+
+                     loc_10005890d:
+000000010005890d         mov        rsi, qword [0x10010f2c8]                    ; @selector(shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:), CODE XREF=-[LWKeybagSupport configGracePeriodIfNeeded]+303
+0000000100058914         lea        rdx, qword [rbp+var_54]
+0000000100058918         mov        rdi, r14
+000000010005891b         call       qword [_objc_msgSend_1000ef540]             ; _objc_msgSend, _objc_msgSend_1000ef540
+0000000100058921         mov        ebx, eax
+0000000100058923         lea        r13, qword [qword_100113d08+8]              ; 0x100113d10
+000000010005892a         mov        rdi, qword [r13]                            ; argument #1 for method sub_100056b7e
+000000010005892e         call       sub_100056b7e                               ; sub_100056b7e
+0000000100058933         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100058935         mov        r13, rax
+0000000100058938         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+000000010005893b         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100058940         test       bl, bl
+0000000100058942         je         loc_100058a98
+
+0000000100058948         test       al, al
+000000010005894a         je         loc_100058980
+
+000000010005894c         lea        r8, qword [rbp+var_50]
+0000000100058950         mov        dword [r8], 0x8200102
+0000000100058957         lea        rax, qword [aLwkeybagsuppor]                ; "-[LWKeybagSupport configGracePeriodIfNeeded]"
+000000010005895e         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100058962         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100058969         lea        rcx, qword [aSSettingOnetim]                ; argument "format" for method imp___stubs___os_log_impl, "%s |      setting oneTimeSSMigrationComplete"
+0000000100058970         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100058972         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100058978         mov        rsi, r13                                    ; argument "log" for method imp___stubs___os_log_impl
+000000010005897b         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100058980:
+0000000100058980         mov        rdi, qword [objc_cls_ref_NSUserDefaults]    ; objc_cls_ref_NSUserDefaults, CODE XREF=-[LWKeybagSupport configGracePeriodIfNeeded]+519
+0000000100058987         mov        rsi, qword [0x10010e098]                    ; @selector(standardUserDefaults)
+000000010005898e         call       r15
+0000000100058991         mov        rsi, qword [0x10010f2d0]                    ; @selector(setBool:forKey:)
+0000000100058998         lea        rcx, qword [cfstring_oneTimeSSMigrationComplete] ; @"oneTimeSSMigrationComplete"
+000000010005899f         mov        edx, 0x1
+00000001000589a4         mov        rdi, rax
+00000001000589a7         call       r15
+00000001000589aa         lea        r15, qword [qword_100113d08+8]              ; 0x100113d10
+00000001000589b1         mov        rdi, qword [r15]                            ; argument #1 for method sub_100056b7e
+00000001000589b4         call       sub_100056b7e                               ; sub_100056b7e
+00000001000589b9         mov        rbx, rax
+00000001000589bc         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+00000001000589be         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+00000001000589c1         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+00000001000589c6         test       al, al
+00000001000589c8         je         loc_1000589fe
+
+00000001000589ca         lea        r8, qword [rbp+var_50]
+00000001000589ce         mov        dword [r8], 0x8200102
+00000001000589d5         lea        rax, qword [aLwkeybagsuppor]                ; "-[LWKeybagSupport configGracePeriodIfNeeded]"
+00000001000589dc         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+00000001000589e0         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+00000001000589e7         lea        rcx, qword [aSErasingAskfor]                ; argument "format" for method imp___stubs___os_log_impl, "%s |      erasing askForPassword and passwordDelay"
+00000001000589ee         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+00000001000589f0         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+00000001000589f6         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+00000001000589f9         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_1000589fe:
+00000001000589fe         lea        rdi, qword [cfstring_askForPassword]        ; argument "key" for method imp___stubs__CFPreferencesSetAppValue, @"askForPassword", CODE XREF=-[LWKeybagSupport configGracePeriodIfNeeded]+645
+0000000100058a05         lea        rbx, qword [cfstring_com_apple_screensaver] ; @"com.apple.screensaver"
+0000000100058a0c         xor        esi, esi                                    ; argument "value" for method imp___stubs__CFPreferencesSetAppValue
+0000000100058a0e         mov        rdx, rbx                                    ; argument "applicationID" for method imp___stubs__CFPreferencesSetAppValue
+0000000100058a11         call       imp___stubs__CFPreferencesSetAppValue       ; CFPreferencesSetAppValue
+0000000100058a16         lea        rdi, qword [cfstring_askForPasswordDelay]   ; argument "key" for method imp___stubs__CFPreferencesSetAppValue, @"askForPasswordDelay"
+0000000100058a1d         xor        esi, esi                                    ; argument "value" for method imp___stubs__CFPreferencesSetAppValue
+0000000100058a1f         mov        rdx, rbx                                    ; argument "applicationID" for method imp___stubs__CFPreferencesSetAppValue
+0000000100058a22         call       imp___stubs__CFPreferencesSetAppValue       ; CFPreferencesSetAppValue
+0000000100058a27         mov        rdi, qword [r15]                            ; argument #1 for method sub_100056b7e
+0000000100058a2a         call       sub_100056b7e                               ; sub_100056b7e
+0000000100058a2f         mov        rbx, rax
+0000000100058a32         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+0000000100058a34         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+0000000100058a37         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+0000000100058a3c         test       al, al
+0000000100058a3e         je         loc_100058a82
+
+0000000100058a40         mov        eax, dword [rbp+var_54]
+0000000100058a43         lea        r8, qword [rbp+var_50]
+0000000100058a47         mov        dword [r8], 0x8200202
+0000000100058a4e         lea        rcx, qword [aLwkeybagsuppor]                ; "-[LWKeybagSupport configGracePeriodIfNeeded]"
+0000000100058a55         mov        qword [r8+4], rcx
+0000000100058a59         mov        word [r8+0xc], 0x400
+0000000100058a60         mov        dword [r8+0xe], eax                         ; argument "buf" for method imp___stubs___os_log_impl
+0000000100058a64         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100058a6b         lea        rcx, qword [aSSettingGraceP_1000c30f0]      ; argument "format" for method imp___stubs___os_log_impl, "%s |      setting grace period to %d for migrated preference"
+0000000100058a72         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100058a74         mov        r9d, 0x12                                   ; argument "size" for method imp___stubs___os_log_impl
+0000000100058a7a         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100058a7d         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_100058a82:
+0000000100058a82         mov        r12d, dword [rbp+var_54]                    ; CODE XREF=-[LWKeybagSupport configGracePeriodIfNeeded]+763
+0000000100058a86         mov        rsi, qword [0x10010f2c0]                    ; @selector(setGracePeriod:)
+0000000100058a8d         mov        rdi, r14
+0000000100058a90         mov        edx, r12d
+0000000100058a93         jmp        loc_1000588e1
+
+                     loc_100058a98:
+0000000100058a98         test       al, al                                      ; CODE XREF=-[LWKeybagSupport configGracePeriodIfNeeded]+511
+0000000100058a9a         je         loc_1000588e7
+
+0000000100058aa0         lea        r8, qword [rbp+var_50]
+0000000100058aa4         mov        dword [r8], 0x8200102
+0000000100058aab         lea        rax, qword [aLwkeybagsuppor]                ; "-[LWKeybagSupport configGracePeriodIfNeeded]"
+0000000100058ab2         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+0000000100058ab6         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+0000000100058abd         lea        rcx, qword [aSNoGracePeriod]                ; argument "format" for method imp___stubs___os_log_impl, "%s |      no grace period changes needed"
+0000000100058ac4         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+0000000100058ac6         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+0000000100058acc         mov        rsi, r13                                    ; argument "log" for method imp___stubs___os_log_impl
+0000000100058acf         call       imp___stubs___os_log_impl                   ; _os_log_impl
+0000000100058ad4         jmp        loc_1000588e7
+
+                     loc_100058ad9:
+0000000100058ad9         call       imp___stubs____stack_chk_fail               ; __stack_chk_fail, CODE XREF=-[LWKeybagSupport configGracePeriodIfNeeded]+434
+                        ; endp
+
+        ; ================ B E G I N N I N G   O F   P R O C E D U R E ================
+
+        ; Variables:
+        ;    var_30: int64_t, -48
+        ;    var_50: int8_t, -80
+        ;    var_54: int32_t, -84
+        ;    var_60: int64_t, -96
+
+
+                     -[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]:
+000000010005a74c         push       rbp                                         ; Objective C Implementation defined at 0x100100cb0 (instance method), DATA XREF=0x100100cb0
+000000010005a74d         mov        rbp, rsp
+000000010005a750         push       r15
+000000010005a752         push       r14
+000000010005a754         push       r13
+000000010005a756         push       r12
+000000010005a758         push       rbx
+000000010005a759         sub        rsp, 0x38
+000000010005a75d         mov        r14, rdx
+000000010005a760         mov        r13, rdi
+000000010005a763         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0
+000000010005a76a         mov        rax, qword [rax]
+000000010005a76d         mov        qword [rbp+var_30], rax
+000000010005a771         mov        dword [rbp+var_54], 0x0
+000000010005a778         lea        r12, qword [qword_100113d08+8]              ; 0x100113d10
+000000010005a77f         mov        rdi, qword [r12]                            ; argument #1 for method sub_100056b7e
+000000010005a783         call       sub_100056b7e                               ; sub_100056b7e
+000000010005a788         mov        rbx, rax
+000000010005a78b         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+000000010005a78d         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+000000010005a790         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+000000010005a795         test       al, al
+000000010005a797         je         loc_10005a7cd
+
+000000010005a799         lea        r8, qword [rbp+var_50]
+000000010005a79d         mov        dword [r8], 0x8200102
+000000010005a7a4         lea        rax, qword [aLwkeybagsuppor_1000e1868]      ; "-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]"
+000000010005a7ab         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+000000010005a7af         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+000000010005a7b6         lea        rcx, qword [aSEnter_1000b4c50]              ; argument "format" for method imp___stubs___os_log_impl, "%s | Enter"
+000000010005a7bd         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+000000010005a7bf         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+000000010005a7c5         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+000000010005a7c8         call       imp___stubs___os_log_impl                   ; _os_log_impl
+
+                     loc_10005a7cd:
+000000010005a7cd         mov        rsi, qword [0x10010f2f0]                    ; @selector(copyDeviceConfiguragtionDictionary), CODE XREF=-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]+75
+000000010005a7d4         mov        rbx, qword [_objc_msgSend_1000ef540]        ; _objc_msgSend_1000ef540
+000000010005a7db         mov        rdi, r13
+000000010005a7de         call       rbx
+000000010005a7e0         mov        r15, rax
+000000010005a7e3         mov        rsi, qword [0x10010f2f8]                    ; @selector(deviceConfigurationFlagsFrom:flags:)
+000000010005a7ea         lea        rcx, qword [rbp+var_54]
+000000010005a7ee         mov        rdi, r13
+000000010005a7f1         mov        rdx, rax
+000000010005a7f4         call       rbx
+000000010005a7f6         test       al, al
+000000010005a7f8         je         loc_10005a880
+
+000000010005a7fe         test       byte [rbp+var_54], 0x1
+000000010005a802         jne        loc_10005a901
+
+                     loc_10005a808:
+000000010005a808         mov        rsi, qword [0x10010f300]                    ; @selector(calculatedPasswordDelayFromPrefs), CODE XREF=-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]+571, -[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]+630
+000000010005a80f         mov        rdi, r13
+000000010005a812         call       qword [_objc_msgSend_1000ef540]             ; _objc_msgSend, _objc_msgSend_1000ef540
+000000010005a818         mov        rbx, r14
+000000010005a81b         mov        dword [r14], eax
+000000010005a81e         mov        rdi, qword [r12]                            ; argument #1 for method sub_100056b7e
+000000010005a822         call       sub_100056b7e                               ; sub_100056b7e
+000000010005a827         mov        r12, rax
+000000010005a82a         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+000000010005a82c         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+000000010005a82f         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+000000010005a834         mov        r14b, 0x1
+000000010005a837         test       al, al
+000000010005a839         je         loc_10005a955
+
+000000010005a83f         mov        eax, dword [rbx]
+000000010005a841         lea        r8, qword [rbp+var_50]
+000000010005a845         mov        dword [r8], 0x8200202
+000000010005a84c         lea        rcx, qword [aLwkeybagsuppor_1000e1868]      ; "-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]"
+000000010005a853         mov        qword [r8+4], rcx
+000000010005a857         mov        word [r8+0xc], 0x400
+000000010005a85e         mov        dword [r8+0xe], eax
+000000010005a862         lea        rdi, qword [__mh_execute_header]            ; __mh_execute_header
+000000010005a869         lea        rcx, qword [aSReturningD_1000b86d0]         ; "%s | returning: %d"
+000000010005a870         xor        edx, edx
+000000010005a872         mov        r9d, 0x12
+000000010005a878         mov        rsi, r12
+000000010005a87b         jmp        loc_10005a950
+
+                     loc_10005a880:
+000000010005a880         mov        rdi, qword [objc_cls_ref_NSUserDefaults]    ; objc_cls_ref_NSUserDefaults, CODE XREF=-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]+172
+000000010005a887         mov        rsi, qword [0x10010e098]                    ; @selector(standardUserDefaults)
+000000010005a88e         call       rbx
+000000010005a890         mov        rsi, qword [0x10010e800]                    ; @selector(boolForKey:)
+000000010005a897         lea        rdx, qword [cfstring_oneTimeSSMigrationComplete] ; @"oneTimeSSMigrationComplete"
+000000010005a89e         mov        rdi, rax
+000000010005a8a1         call       rbx
+000000010005a8a3         mov        ebx, eax
+000000010005a8a5         mov        rdi, qword [r12]                            ; argument #1 for method sub_100056b7e
+000000010005a8a9         call       sub_100056b7e                               ; sub_100056b7e
+000000010005a8ae         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+000000010005a8b0         mov        qword [rbp+var_60], rax
+000000010005a8b4         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+000000010005a8b7         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+000000010005a8bc         test       bl, bl
+000000010005a8be         je         loc_10005a985
+
+000000010005a8c4         test       al, al
+000000010005a8c6         je         loc_10005a9c7
+
+000000010005a8cc         lea        r8, qword [rbp+var_50]
+000000010005a8d0         mov        dword [r8], 0x8200102
+000000010005a8d7         lea        rax, qword [aLwkeybagsuppor_1000e1868]      ; "-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]"
+000000010005a8de         mov        qword [r8+4], rax
+000000010005a8e2         lea        rdi, qword [__mh_execute_header]            ; __mh_execute_header
+000000010005a8e9         lea        rcx, qword [aSOnetimessmigr]                ; "%s | oneTimeSSMigrationComplete found, do not migrate lock pref settings"
+000000010005a8f0         xor        r14d, r14d
+000000010005a8f3         xor        edx, edx
+000000010005a8f5         mov        r9d, 0xc
+000000010005a8fb         mov        rsi, qword [rbp+var_60]
+000000010005a8ff         jmp        loc_10005a950
+
+                     loc_10005a901:
+000000010005a901         mov        rdi, qword [r12]                            ; argument #1 for method sub_100056b7e, CODE XREF=-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]+182
+000000010005a905         call       sub_100056b7e                               ; sub_100056b7e
+000000010005a90a         mov        rbx, rax
+000000010005a90d         xor        r14d, r14d
+000000010005a910         xor        esi, esi                                    ; argument "type" for method imp___stubs__os_log_type_enabled
+000000010005a912         mov        rdi, rax                                    ; argument "oslog" for method imp___stubs__os_log_type_enabled
+000000010005a915         call       imp___stubs__os_log_type_enabled            ; os_log_type_enabled
+000000010005a91a         test       al, al
+000000010005a91c         je         loc_10005a955
+
+000000010005a91e         lea        r8, qword [rbp+var_50]
+000000010005a922         mov        dword [r8], 0x8200102
+000000010005a929         lea        rax, qword [aLwkeybagsuppor_1000e1868]      ; "-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]"
+000000010005a930         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+000000010005a934         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+000000010005a93b         lea        rcx, qword [aSKmkbconfigfla]                ; argument "format" for method imp___stubs___os_log_impl, "%s | kMKBConfigFlagGracePeriodSet flag found, do not migrate lock pref settings"
+000000010005a942         xor        r14d, r14d
+000000010005a945         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+000000010005a947         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+000000010005a94d         mov        rsi, rbx                                    ; argument "log" for method imp___stubs___os_log_impl
+
+                     loc_10005a950:
+000000010005a950         call       imp___stubs___os_log_impl                   ; _os_log_impl, CODE XREF=-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]+303, -[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]+435
+
+                     loc_10005a955:
+000000010005a955         test       r15, r15                                    ; CODE XREF=-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]+237, -[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]+464, -[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]+638
+000000010005a958         je         loc_10005a962
+
+000000010005a95a         mov        rdi, r15                                    ; argument "cf" for method imp___stubs__CFRelease
+000000010005a95d         call       imp___stubs__CFRelease                      ; CFRelease
+
+                     loc_10005a962:
+000000010005a962         mov        rax, qword [___stack_chk_guard_1000ef1e0]   ; ___stack_chk_guard_1000ef1e0, CODE XREF=-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]+524
+000000010005a969         mov        rax, qword [rax]
+000000010005a96c         cmp        rax, qword [rbp+var_30]
+000000010005a970         jne        loc_10005a9cc
+
+000000010005a972         movzx      eax, r14b
+000000010005a976         add        rsp, 0x38
+000000010005a97a         pop        rbx
+000000010005a97b         pop        r12
+000000010005a97d         pop        r13
+000000010005a97f         pop        r14
+000000010005a981         pop        r15
+000000010005a983         pop        rbp
+000000010005a984         ret
+                        ; endp
+
+                     loc_10005a985:
+000000010005a985         test       al, al                                      ; CODE XREF=-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]+370
+000000010005a987         je         loc_10005a808
+
+000000010005a98d         lea        r8, qword [rbp+var_50]
+000000010005a991         mov        dword [r8], 0x8200102
+000000010005a998         lea        rax, qword [aLwkeybagsuppor_1000e1868]      ; "-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]"
+000000010005a99f         mov        qword [r8+4], rax                           ; argument "buf" for method imp___stubs___os_log_impl
+000000010005a9a3         lea        rdi, qword [__mh_execute_header]            ; argument "dso" for method imp___stubs___os_log_impl, __mh_execute_header
+000000010005a9aa         lea        rcx, qword [aSNoDeviceConfi]                ; argument "format" for method imp___stubs___os_log_impl, "%s | No device config and NO oneTimeSSMigrationComplete"
+000000010005a9b1         xor        edx, edx                                    ; argument "type" for method imp___stubs___os_log_impl
+000000010005a9b3         mov        r9d, 0xc                                    ; argument "size" for method imp___stubs___os_log_impl
+000000010005a9b9         mov        rsi, qword [rbp+var_60]                     ; argument "log" for method imp___stubs___os_log_impl
+000000010005a9bd         call       imp___stubs___os_log_impl                   ; _os_log_impl
+000000010005a9c2         jmp        loc_10005a808
+
+                     loc_10005a9c7:
+000000010005a9c7         xor        r14d, r14d                                  ; CODE XREF=-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]+378
+000000010005a9ca         jmp        loc_10005a955
+
+                     loc_10005a9cc:
+000000010005a9cc         call       imp___stubs____stack_chk_fail               ; __stack_chk_fail, CODE XREF=-[LWKeybagSupport shouldMigrateScreenlockPreferencesToUpdatedGracePeriod:]+548
+                        ; endp
+
+Debugging output from lldb as I switched between different gracePeriod values:
+(lldb) breakpoint set -a 0x102931ea2
+Breakpoint 4: where = loginwindow`___lldb_unnamed_symbol147$$loginwindow + 135, address = 0x0000000102931ea2
+(lldb) breakpoint command add 1
+error: '1' is not a currently valid breakpoint ID.
+(lldb) breakpoint command add 4
+Enter your debugger command(s).  Type 'DONE' to end.
+Process 90 stopped
+* thread #10, queue = 'com.apple.NSXPCConnection.user.1590', stop reason = breakpoint 4.1
+    frame #0: 0x0000000102931ea2 loginwindow`___lldb_unnamed_symbol147$$loginwindow + 135
+loginwindow`___lldb_unnamed_symbol147$$loginwindow:
+->  0x102931ea2 <+135>: movl   %r15d, (%r14,%rax)
+    0x102931ea6 <+139>: movq   0xdb333(%rip), %rax       ; (void *)0x00007fffa3c1c070: __stack_chk_guard
+    0x102931ead <+146>: movq   (%rax), %rax
+    0x102931eb0 <+149>: cmpq   -0x20(%rbp), %rax
+Target 0: (loginwindow) stopped.
+> register read r14 rax r15 
+> c 
+(lldb) c
+Process 90 resuming
+(lldb)  register read r14 rax r15
+     r14 = 0x0000600001c21180
+     rax = 0x000000000000000c
+     r15 = 0x000000000000012c
+
+(lldb)  c
+Process 90 resuming
+
+Command #2 'c' continued the target.
+(lldb)  register read r14 rax r15
+     r14 = 0x0000600001c21180
+     rax = 0x000000000000000c
+     r15 = 0x0000000000003840
+
+(lldb)  c
+Process 90 resuming
+
+Command #2 'c' continued the target.
+(lldb)  register read r14 rax r15
+     r14 = 0x0000600001c21180
+     rax = 0x000000000000000c
+     r15 = 0x0000000000007080
+
+(lldb)  c
+Process 90 resuming
+
+Command #2 'c' continued the target.
+(lldb)  register read r14 rax r15
+     r14 = 0x0000600001c21180
+     rax = 0x000000000000000c
+     r15 = 0x0000000000000000
+
+(lldb)  c
+Process 90 resuming
+
+Command #2 'c' continued the target.
+(lldb)  register read r14 rax r15
+     r14 = 0x0000600001c21180
+     rax = 0x000000000000000c
+     r15 = 0x0000000000000005
+
+(lldb)  c
+Process 90 resuming
+
+Command #2 'c' continued the target.
+(lldb)  register read r14 rax r15
+     r14 = 0x0000600001c21180
+     rax = 0x000000000000000c
+     r15 = 0x000000000000003c
+
+(lldb)  c
+Process 90 resuming
+
+Command #2 'c' continued the target.
+(lldb)  register read r14 rax r15
+     r14 = 0x0000600001c21180
+     rax = 0x000000000000000c
+     r15 = 0x0000000000007080
+
+(lldb)  c
+Process 90 resuming
+
+Command #2 'c' continued the target.
+(lldb)  register read r14 rax r15
+     r14 = 0x0000600001c21180
+     rax = 0x000000000000000c
+     r15 = 0x0000000000000384
+
+(lldb)  c
+Process 90 resuming
+
+Command #2 'c' continued the target.
+(lldb)  register read r14 rax r15
+     r14 = 0x0000600001c21180
+     rax = 0x000000000000000c
+     r15 = 0x0000000000000005
+
+(lldb)  c
+
+
+
+To find the user's set gracePeriod, we'll use the method in this c-code of searching for a known signature to find the randomized base address and a known offset:
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <libproc.h>
+#include <sys/time.h>
+#include <time.h>
+
+// Extended 32-byte signature to distinguish from the "Twin" at 0x2b24b
+unsigned char signature[] = { 
+    0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 
+    0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x81, 0xEC, 
+    0xB8, 0x00, 0x00, 0x00, 0x41, 0x89, 0xD6, 0x49,
+    0x89, 0xFD, 0x48, 0x8B, 0x05, 0xB0, 0x66, 0x0C 
+};
+
+void log_status(const char *msg, uint64_t offset) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    struct tm* tm_info = localtime(&tv.tv_sec);
+    char time_buf[64];
+    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", tm_info);
+    
+    if (offset > 0) {
+        printf("[%s.%03d] %s (Offset: 0x%llx)\n", time_buf, (int)(tv.tv_usec / 1000), msg, offset);
+    } else {
+        printf("[%s.%03d] %s\n", time_buf, (int)(tv.tv_usec / 1000), msg);
+    }
+}
+
+uint64_t find_offset(task_t task, uint64_t *base_addr) {
+    mach_vm_address_t address = 0;
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object_name;
+
+    *base_addr = 0;
+    
+    // Iterate through all memory regions of the process
+    while (mach_vm_region(task, &address, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count, &object_name) == KERN_SUCCESS) {
+        
+        // The first region we encounter is the base of the executable image (due to ASLR)
+        if (*base_addr == 0) *base_addr = (uint64_t)address;
+
+        // We only care about Readable + Executable regions (the __TEXT segment)
+        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_EXECUTE)) {
+            unsigned char *buf = malloc(size);
+            mach_vm_size_t bytes_read;
+            
+            if (mach_vm_read_overwrite(task, address, size, (mach_vm_address_t)buf, &bytes_read) == KERN_SUCCESS) {
+                // Search the buffer for our 32-byte signature
+                for (mach_vm_size_t i = 0; i < bytes_read - sizeof(signature); i++) {
+                    
+                    /* WILDCARD LOGIC:
+                       We compare starting from the second byte (index 1).
+                       This allows us to find the function regardless of whether 
+                       the first byte is currently 0x55 (Original) or 0xC3 (Patched).
+                    */
+                    if (memcmp(&buf[i + 1], &signature[1], sizeof(signature) - 1) == 0) {
+                        
+                        // Final Safety Check: Verify the head byte is one of our two known states
+                        if (buf[i] == 0x55 || buf[i] == 0xC3) {
+                            uint64_t found_addr = address + i;
+                            free(buf);
+                            return found_addr; // Target confirmed
+                        }
+                    }
+                }
+            }
+            free(buf);
+        }
+        // Move to the next memory region
+        address += size;
+    }
+    
+    return 0; // Signature not found in any executable region
+}
+
+int main(int argc, char **argv) {
+    int revert = (argc > 1 && strcmp(argv[1], "--revert") == 0);
+    
+    pid_t pid = -1;
+    int proc_count = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
+    pid_t pids[proc_count];
+    proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
+    for (int i = 0; i < proc_count; i++) {
+        char name[1024];
+        if (proc_name(pids[i], name, sizeof(name)) > 0 && strcmp(name, "loginwindow") == 0) {
+            pid = pids[i];
+            break;
+        }
+    }
+
+    if (pid == -1) {
+        log_status("ERROR: loginwindow not found.", 0);
+        return 1;
+    }
+
+    task_t task;
+    if (task_for_pid(mach_task_self(), pid, &task) != KERN_SUCCESS) {
+        log_status("ERROR: Task port failed.", 0);
+        return 1;
+    }
+
+    uint64_t base_addr;
+    uint64_t target_addr = find_offset(task, &base_addr);
+
+    if (target_addr == 0) {
+        log_status("ERROR: Signature not found.", 0);
+        return 1;
+    }
+
+    uint64_t offset = target_addr - base_addr;
+    uint8_t byte = revert ? 0x55 : 0xC3;
+    
+    mach_vm_protect(task, target_addr, 1, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (mach_vm_write(task, target_addr, (pointer_t)&byte, 1) == KERN_SUCCESS) {
+        char log_msg[64];
+        snprintf(log_msg, sizeof(log_msg), "SUCCESS: %s applied", revert ? "Revert" : "Patch");
+        log_status(log_msg, offset);
+    }
+    mach_vm_protect(task, target_addr, 1, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+
+    return 0;
+}
+

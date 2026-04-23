@@ -1,0 +1,655 @@
+THE PROBLEM:
+On T2 Macs with firmware updated by newer versions of macOS and then reverted to back Mojave, the System Preferences > Security & Privacy  > General > "Require password [grace period] after sleep or screen saver begins" setting is ignored. Regardless of the checkbox state or the grace period selected in the dropdown, the system is locked immediately when sleep or screen saver begin.
+
+As an additional side effect, the system often locks even before screen saver or sleep activation, with the desktop and apps still on the screen. In this state, the mouse moves but clicks and keyboard entry are ignored. The system can be unlocked by hitting Esc to display the password unlock field and entering the password, or by simply blindly entering the password into the hidden password field.
+
+NAMES:
+I've been brainstorming names. Not sure if I should go with "Patch", "Patcher", or simply "Fix." Mojave Lock Fix, Mojave Screen Lock Fix. I'm open to suggestions, and it doesn't have to be a literal, explicit name either, but I do like short. We may also be able to play with T2 and the Terminator movie.
+
+GOAL:
+Since we got stuck on the actual screen locking task, our goal now is to clean the code up, split it into components, add a ReadMe.md, throw it up on my GitHub, and open it to the open source community to address.
+
+SOLUTION:
+
+PHASE 1: success
+We disassembled loginwindow.app/Contents/MacOS/loginwindow in Hopper, identified the bit to flip in loginwindow's memory to prevent locking, and dynamically found its offset memory address to accommodate difference between Mojave builds. This successfully disables screen locking entirely, regardless of checkbox state or selected grace period in the dropdown.
+
+PHASE 2:
+While Phase 1 prevents both the immediate screen lock on saver and sleep start as well as the blind locking with apps and desktop still on screen, the second phase must reinstate core security functionality to respect behavior set by the checkbox and grace period dropdown. 
+
+IMPLEMENTATION:
+monitor.c: detect start and stop events of screen saver and sleep 
+ - When run on the command line, it listens for the events and prints updates.
+ - Control-c ends it
+
+find_offset.c: to support variance between Mojave builds, dynamically find and return the offset of the bit to flip to disable setScreenLock
+
+grace_period.c: read user grace period set by the "Require password [grace period dropwdown]..." dropdown
+ - When run on the command line, it prints "Grade period: " followed by the actual value.
+ - When imported as a C module, it returns the int
+
+logger.c: log actions, detected grace period, and events to /var/log/com.samrod.lockpatch.log and /var/log/com.samrod.err with time stamps
+
+lock_screen.c: initiate silent lock state so that future user action triggers password unlock field. This is the only task we have failed to accomplish. All others are successfull.
+
+lockpatch.c: toggle patch off & on using the offset from find_offset.
+ - Imports find_offset.c
+ - Run independently as a command line executable, this applies the patch.
+ - The -r and --revert flags revert the patch.
+
+[unnamed].c: master output, compiles to /Library/Application\ Support/Lockpatch/[unnamed].dylib, that orchestrates business logic and injects patch into loginwindow.app memory space. If you know a nice name for this, I'm all ears.
+ - Imports grace_period.c, logger.c, lock_screen.c, lockpatch.c
+ - If grace_period == 2,147,483,647, never lock screen or revet patch. Patch remains active.
+ - If grace_period < 2,147,483,647, revert patch between sleep / saver start and grace period expiration, and then initiate silent lock precicely at expiration.
+ - Always ensure patch is applied and active on sleep / saver end.
+
+launcher.c: executable called by com.samrod.lockpatch LaunchDaemon
+
+com.samrod.lockpatch.plist: goes in /Library/LaunchDaemons
+
+make.sh: compiler code because I'm too lazy to keep retyping and setting perms and ownership each time
+
+Current sources:
+
+This is the main file we've been working on with all the components hard coded in rather than imported, which may or may not have been compromised due to you losing context and hallucinagting. This is not to be confused with ultimate goal of lockpatch.c which merely imports the various components. I'm just showing you this as a guide for final functionality and are state of progress. This also includes our unsuccessfull screen locking functionality. In its current state, it locks the screen, but rather than doing so silently behind the scenes, it displays the password field to unlock. The logging and screen locking don't have their own .c files like the others I'll show you.
+
+###lockpactch.c:
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <dlfcn.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <mach-o/dyld.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <notify.h>
+#include <pthread.h>
+#include <objc/runtime.h>
+#include <objc/message.h>
+#include <dispatch/dispatch.h>
+
+#define MKB_NEVER_LOCK 2147483647
+
+static double last_session_start = 0;
+static int is_never_mode = 0; 
+static uint64_t cached_target_addr = 0;
+
+// The 32-byte signature from lockpatch-GM.c
+unsigned char signature[] = { 
+    0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 
+    0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x81, 0xEC, 
+    0xB8, 0x00, 0x00, 0x00, 0x41, 0x89, 0xD6, 0x49,
+    0x89, 0xFD, 0x48, 0x8B, 0x05, 0xB0, 0x66, 0x0C 
+};
+
+typedef CFDictionaryRef (*MKBDeviceGetGracePeriod_t)(int bag_id);
+
+void log_status(const char* message) {
+    FILE *f = fopen("/var/log/samrod.lockpatch.log", "a");
+    if (f) {
+        time_t now; time(&now);
+        char *date_str = ctime(&now);
+        if (date_str) {
+            size_t len = strlen(date_str);
+            if (len > 0) date_str[len - 1] = '\0';
+            fprintf(f, "[LockPatch][%s] %s\n", date_str, message);
+        }
+        fclose(f);
+    }
+}
+
+uint64_t find_live_offset() {
+    task_t task = mach_task_self();
+    mach_vm_address_t address = 0;
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object_name;
+
+    while (mach_vm_region(task, &address, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count, &object_name) == KERN_SUCCESS) {
+        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_EXECUTE)) {
+            unsigned char *buf = malloc(size);
+            mach_vm_size_t bytes_read;
+            if (mach_vm_read_overwrite(task, address, size, (mach_vm_address_t)buf, &bytes_read) == KERN_SUCCESS) {
+                for (mach_vm_size_t i = 0; i < bytes_read - sizeof(signature); i++) {
+                    if (memcmp(&buf[i + 1], &signature[1], sizeof(signature) - 1) == 0) {
+                        if (buf[i] == 0x55 || buf[i] == 0xC3) {
+                            uint64_t found = address + i;
+                            free(buf);
+                            return found;
+                        }
+                    }
+                }
+            }
+            free(buf);
+        }
+        address += size;
+    }
+    return 0;
+}
+
+void perform_memory_op(int mode) {
+    if (is_never_mode && mode == 1) {
+        log_status("Shield removal BLOCKED: Never-Mode is active.");
+        return;
+    }
+
+    if (cached_target_addr == 0) {
+        cached_target_addr = find_live_offset();
+        if (cached_target_addr == 0) {
+            log_status("CRITICAL: Could not find signature in memory.");
+            return;
+        }
+    }
+
+    task_t port = mach_task_self();
+    uint8_t patch[] = {0xC3, 0x90}, revert[] = {0x55, 0x48};
+    uint8_t *data = (mode == 0) ? patch : revert;
+
+    kern_return_t kr = vm_protect(port, cached_target_addr, 2, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) return;
+    
+    memcpy((void*)cached_target_addr, data, 2);
+    vm_protect(port, cached_target_addr, 2, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    log_status(mode == 0 ? "PATCH APPLIED (Dynamic)" : "PATCH REMOVED (Dynamic)");
+}
+
+void* lock_timer_thread(void* vargp) {
+    double session_time = *(double*)vargp;
+    free(vargp);
+
+    int32_t seconds = 0;
+    void *handle = dlopen("/System/Library/PrivateFrameworks/MobileKeyBag.framework/MobileKeyBag", RTLD_LAZY);
+    if (handle) {
+        MKBDeviceGetGracePeriod_t get_grace = (MKBDeviceGetGracePeriod_t)dlsym(handle, "MKBDeviceGetGracePeriod");
+        CFStringRef *kMKBConfigGracePeriod = (CFStringRef *)dlsym(handle, "kMKBConfigGracePeriod");
+        if (get_grace && kMKBConfigGracePeriod) {
+            CFDictionaryRef settings = get_grace(0);
+            if (settings) {
+                CFNumberRef graceValue = (CFNumberRef)CFDictionaryGetValue(settings, *kMKBConfigGracePeriod);
+                if (graceValue) CFNumberGetValue(graceValue, kCFNumberSInt32Type, &seconds);
+                CFRelease(settings);
+            }
+        }
+        dlclose(handle);
+    }
+
+    if (seconds >= MKB_NEVER_LOCK || seconds < 0) {
+        is_never_mode = 1;
+        log_status("Mode: NEVER. Patch is permanent.");
+        return NULL; 
+    }
+
+    if (seconds > 0) sleep(seconds);
+
+    if (last_session_start == session_time) {
+        perform_memory_op(1); 
+        // Future: Silent lock logic here
+    }
+    return NULL;
+}
+
+void handle_lock_event() {
+    last_session_start = CFAbsoluteTimeGetCurrent();
+    double* thread_session = malloc(sizeof(double));
+    if (thread_session) {
+        *thread_session = last_session_start;
+        pthread_t tid;
+        pthread_create(&tid, NULL, lock_timer_thread, thread_session);
+        pthread_detach(tid);
+    }
+}
+
+void handle_stop_event() {
+    last_session_start = 0;
+    perform_memory_op(1); 
+}
+
+__attribute__((constructor))
+void initialize() {
+    perform_memory_op(0); 
+    log_status("LockPatch Active. Target found via signature scan.");
+    
+    CFNotificationCenterRef center = CFNotificationCenterGetDistributedCenter();
+    CFNotificationCenterAddObserver(center, NULL, (void*)handle_lock_event, CFSTR("com.apple.screensaver.didstart"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(center, NULL, (void*)handle_stop_event, CFSTR("com.apple.screensaver.didstop"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+}
+
+###grace_period.c:
+#include <CoreFoundation/CoreFoundation.h>
+#include <dlfcn.h>
+#include <stdio.h>
+
+/*
+ * Compile with: 
+ * clang -framework CoreFoundation get_grace.c -o get_grace
+ */
+
+// Signature matched to your Hopper disassembly:
+// Returns CFDictionaryRef in rax, takes 0 (keybag ID) in rdi.
+typedef CFDictionaryRef (*MKBDeviceGetGracePeriod_t)(int bag_id);
+
+int main() {
+    void *handle = dlopen("/System/Library/PrivateFrameworks/MobileKeyBag.framework/MobileKeyBag", RTLD_LAZY);
+    if (!handle) return 1;
+
+    MKBDeviceGetGracePeriod_t get_grace = (MKBDeviceGetGracePeriod_t)dlsym(handle, "MKBDeviceGetGracePeriod");
+    CFStringRef *kMKBConfigGracePeriod = (CFStringRef *)dlsym(handle, "kMKBConfigGracePeriod");
+
+    if (!get_grace || !kMKBConfigGracePeriod) {
+        dlclose(handle);
+        return 1;
+    }
+
+    // Call with 0 as seen in: xor edi, edi ; call MKBDeviceGetGracePeriod
+    CFDictionaryRef settings = get_grace(0);
+    
+    if (settings) {
+        // Retrieve value using the key: mov rsi, qword [rax] ; mov rdi, rbx ; call CFDictionaryGetValue
+        CFNumberRef graceValue = (CFNumberRef)CFDictionaryGetValue(settings, *kMKBConfigGracePeriod);
+        
+        int32_t seconds = 0;
+        if (graceValue && CFNumberGetValue(graceValue, kCFNumberSInt32Type, &seconds)) {
+            // "Never" is typically 2147483647 (INT_MAX)
+            if (seconds == 2147483647) {
+                printf("Value: Never (%d)\n", seconds);
+            } else {
+                printf("Value: %d seconds\n", seconds);
+            }
+        } else {
+            printf("Value: 0 (Immediate)\n");
+        }
+        
+        // Note: The dictionary returned by MKB is often internally managed, 
+        // but your disassembly shows a call to CFRelease
+        CFRelease(settings);
+    } else {
+        printf("Error: Could not retrieve Keybag settings.\n");
+    }
+
+    dlclose(handle);
+    return 0;
+}
+
+###launcher.c:
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <notify.h>
+#include <dispatch/dispatch.h>
+
+void inject() {
+    // 5s buffer: gives loginwindow time to map its memory properly
+    sleep(5); 
+    const char *cmd = "/usr/bin/lldb -p $(/usr/bin/pgrep -x loginwindow) --batch "
+                      "-o 'expression (void*)dlopen(\"/Library/Application Support/LockPatch/lockpatch.dylib\", 1)' "
+                      "-o 'detach' -o 'quit' >> /var/log/samrod.lockpatch.log 2>&1";
+    system(cmd);
+}
+
+int main() {
+    setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1);
+    
+    // Initial injection for the session currently running at boot
+    inject();
+
+    // Create a queue to handle the notification
+    dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+    int token;
+
+    // Register for the notification that fires when a new loginwindow process is ready
+    notify_register_dispatch("com.apple.system.loginwindow.appearing", 
+                             &token, 
+                             queue, 
+                             ^(int t) {
+                                 // This block runs every time a new loginwindow appears (logout/login)
+                                 inject();
+                             });
+
+    // Keep the process alive to continue listening
+    dispatch_main();
+
+    return 0;
+}
+
+###monitor.c:
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/IOKitLib.h>
+#include <IOKit/IOMessage.h>
+#include <IOKit/pwr_mgt/IOPMLib.h>
+#include <dlfcn.h>
+#include <stdio.h>
+#include <string.h>
+#include <dispatch/dispatch.h>
+#include <libproc.h>
+
+/*
+ * Compile with: 
+ * clang -framework CoreFoundation -framework IOKit monitor.c -o monitor
+ */
+
+int is_patched = 0; 
+int lock_handled = 0; // New flag to prevent duplicate logging during a single lock session
+
+void apply_patch() {
+    if (is_patched) return;
+    printf("[ACTION] Patching loginwindow (Suppressing immediate lock bug)...\n");
+    // [Insert your task_for_pid / mach_vm_write code here]
+    is_patched = 1;
+}
+
+void revert_patch() {
+    if (!is_patched) return;
+    printf("[ACTION] Reverting loginwindow (Handing off to native grace timer)...\n");
+    // [Insert your task_for_pid / mach_vm_write code here]
+    is_patched = 0;
+}
+
+typedef CFDictionaryRef (*MKBDeviceGetGracePeriod_t)(int bag_id);
+
+int32_t get_current_grace_period() {
+    void *handle = dlopen("/System/Library/PrivateFrameworks/MobileKeyBag.framework/MobileKeyBag", RTLD_LAZY);
+    if (!handle) return 0;
+    MKBDeviceGetGracePeriod_t get_grace = (MKBDeviceGetGracePeriod_t)dlsym(handle, "MKBDeviceGetGracePeriod");
+    CFStringRef *kMKBConfigGracePeriod = (CFStringRef *)dlsym(handle, "kMKBConfigGracePeriod");
+    int32_t seconds = 0;
+    if (get_grace && kMKBConfigGracePeriod) {
+        CFDictionaryRef settings = get_grace(0);
+        if (settings) {
+            CFNumberRef val = (CFNumberRef)CFDictionaryGetValue(settings, *kMKBConfigGracePeriod);
+            if (val) CFNumberGetValue(val, kCFNumberSInt32Type, &seconds);
+            CFRelease(settings);
+        }
+    }
+    dlclose(handle);
+    return seconds;
+}
+
+void handle_lock_intent(const char* source) {
+    // If we already handled the start of this lock/saver session, ignore duplicate triggers
+    if (lock_handled) return;
+    
+    int32_t grace = get_current_grace_period();
+    printf("[LOG] Trigger: %s | Grace: %d\n", source, grace);
+
+    lock_handled = 1; // Mark as handled until next unlock
+
+    if (grace == 2147483647) return; // "Never" - keep patch active
+
+    if (grace == 0) {
+        revert_patch();
+    } else {
+        // Wait 1s to clear the buggy "immediate" window, then revert to allow native timer
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            revert_patch();
+        });
+    }
+}
+
+// Process Poller (Will Start precursor)
+void check_process_list(CFRunLoopTimerRef timer, void *info) {
+    if (lock_handled) return; // Don't bother checking if we've already reacted
+
+    int proc_count = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
+    pid_t pids[proc_count];
+    proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
+    
+    for (int i = 0; i < proc_count; i++) {
+        char name[PROC_PIDPATHINFO_MAXSIZE];
+        if (proc_name(pids[i], name, sizeof(name)) > 0) {
+            if (strcmp(name, "ScreenSaverEngine") == 0) {
+                handle_lock_intent("ScreenSaverEngine Process Detected");
+                break;
+            }
+        }
+    }
+}
+
+void system_power_callback(void *refCon, io_service_t service, uint32_t messageType, void *messageArgument) {
+    if (messageType == kIOMessageSystemWillSleep) {
+        handle_lock_intent("System Will Sleep");
+        IOAllowPowerChange((io_connect_t)refCon, (long)messageArgument);
+    } else if (messageType == kIOMessageCanSystemSleep) {
+        IOAllowPowerChange((io_connect_t)refCon, (long)messageArgument);
+    }
+}
+
+void display_callback(void *refCon, io_service_t service, uint32_t messageType, void *messageArgument) {
+    if (messageType == kIOMessageDeviceWillPowerOff) {
+        handle_lock_intent("Display Will Sleep");
+    }
+}
+
+void notification_callback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    char buffer[128];
+    if (name && CFStringGetCString(name, buffer, sizeof(buffer), kCFStringEncodingUTF8)) {
+        if (strcmp(buffer, "com.apple.screensaver.didstart") == 0) {
+            handle_lock_intent("Screen Saver Notification (didstart)");
+        } 
+        else if (strcmp(buffer, "com.apple.screenIsUnlocked") == 0 || 
+                 strcmp(buffer, "com.apple.screensaver.didstop") == 0) {
+            if (lock_handled) {
+                printf("[EVENT] Unlock Detected. Resetting state.\n");
+                lock_handled = 0; // Reset for the next lock event
+                apply_patch();
+            }
+        }
+    }
+}
+
+int main() {
+    CFRunLoopRef runLoop = CFRunLoopGetCurrent();
+    CFNotificationCenterRef distCenter = CFNotificationCenterGetDistributedCenter();
+
+    const char* notifications[] = { "com.apple.screensaver.didstart", "com.apple.screensaver.didstop", "com.apple.screenIsUnlocked" };
+    for(int i = 0; i < 3; i++) {
+        CFStringRef noteName = CFStringCreateWithCString(NULL, notifications[i], kCFStringEncodingUTF8);
+        CFNotificationCenterAddObserver(distCenter, NULL, notification_callback, noteName, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFRelease(noteName);
+    }
+
+    IONotificationPortRef notifyPortRef = IONotificationPortCreate(kIOMasterPortDefault);
+    io_object_t notifier;
+    io_connect_t root_port = IORegisterForSystemPower(&root_port, &notifyPortRef, system_power_callback, &notifier);
+    CFRunLoopAddSource(runLoop, IONotificationPortGetRunLoopSource(notifyPortRef), kCFRunLoopDefaultMode);
+
+    io_service_t displayWrangler = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IODisplayWrangler"));
+    if (displayWrangler) {
+        IOServiceAddInterestNotification(notifyPortRef, displayWrangler, kIOGeneralInterest, display_callback, NULL, &notifier);
+        IOObjectRelease(displayWrangler);
+    }
+
+    // Poller runs every 0.25 seconds for higher precision
+    CFRunLoopTimerContext ctx = {0, NULL, NULL, NULL, NULL};
+    CFRunLoopTimerRef timer = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent(), 0.25, 0, 0, check_process_list, &ctx);
+    CFRunLoopAddTimer(runLoop, timer, kCFRunLoopDefaultMode);
+
+    apply_patch();
+    printf("Monitoring Mojave... (Ctrl+C to stop)\n");
+    CFRunLoopRun();
+    return 0;
+}
+
+com.samrod.lockpatch.plist:
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.samrod.lockpatch</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/lockpatch_launcher</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardErrorPath</key>
+    <string>/var/log/lockpatch_launcher.err</string>
+    <key>StandardOutPath</key>
+    <string>/var/log/lockpatch_launcher.log</string>
+</dict>
+</plist>
+
+make.sh:
+#/bin/sh
+
+# Compile with Objective-C runtime linking
+sudo clang \
+    -F /System/Library/PrivateFrameworks \
+    -dynamiclib \
+    -lobjc \
+    -framework CoreFoundation \
+    -framework Foundation \
+    -framework SystemConfiguration \
+    -framework login \
+    lockpatch.c \
+    -o "/Library/Application Support/LockPatch/lockpatch.dylib" &&
+
+# Ad-hoc sign the dylib (will we need a more robust solution for open source distribution?)
+sudo codesign -s - --force "/Library/Application Support/LockPatch/lockpatch.dylib" &&
+
+# Inject into the running process (commented out because I just kept rebooting)
+#sudo lldb -p $(pgrep -x loginwindow) --batch \
+    #-o 'expression (void*)dlopen("/Library/Application Support/LockPatch/lockpatch.dylib", 1)' \
+    #-o 'detach' \
+    #-o 'quit' &&
+
+# Ensure permissions are correct
+sudo chown root:wheel "/Library/Application Support/LockPatch/lockpatch.dylib" 
+
+# Cycle the control daemon (commented out because I just kept rebooting)
+#sudo launchctl unload -w /Library/LaunchDaemons/com.samrod.lockpatch.plist 2>/dev/null
+#sleep 2
+#sudo launchctl load -w /Library/LaunchDaemons/com.samrod.lockpatch.plist
+
+This is the most reliable code to dynamically find the offset and patch it so to prevent screen locking. The finding offset logic and patching logic will need to be split into separate modules:
+###lockpatch-GM.c:
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <libproc.h>
+#include <sys/time.h>
+#include <time.h>
+
+// Extended 32-byte signature to distinguish from the "Twin" at 0x2b24b
+unsigned char signature[] = { 
+    0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 
+    0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x81, 0xEC, 
+    0xB8, 0x00, 0x00, 0x00, 0x41, 0x89, 0xD6, 0x49,
+    0x89, 0xFD, 0x48, 0x8B, 0x05, 0xB0, 0x66, 0x0C 
+};
+
+void log_status(const char *msg, uint64_t offset) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    struct tm* tm_info = localtime(&tv.tv_sec);
+    char time_buf[64];
+    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", tm_info);
+    
+    if (offset > 0) {
+        printf("[%s.%03d] %s (Offset: 0x%llx)\n", time_buf, (int)(tv.tv_usec / 1000), msg, offset);
+    } else {
+        printf("[%s.%03d] %s\n", time_buf, (int)(tv.tv_usec / 1000), msg);
+    }
+}
+
+uint64_t find_offset(task_t task, uint64_t *base_addr) {
+    mach_vm_address_t address = 0;
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object_name;
+
+    *base_addr = 0;
+    
+    // Iterate through all memory regions of the process
+    while (mach_vm_region(task, &address, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count, &object_name) == KERN_SUCCESS) {
+        
+        // The first region we encounter is the base of the executable image (due to ASLR)
+        if (*base_addr == 0) *base_addr = (uint64_t)address;
+
+        // We only care about Readable + Executable regions (the __TEXT segment)
+        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_EXECUTE)) {
+            unsigned char *buf = malloc(size);
+            mach_vm_size_t bytes_read;
+            
+            if (mach_vm_read_overwrite(task, address, size, (mach_vm_address_t)buf, &bytes_read) == KERN_SUCCESS) {
+                // Search the buffer for our 32-byte signature
+                for (mach_vm_size_t i = 0; i < bytes_read - sizeof(signature); i++) {
+                    
+                    /* WILDCARD LOGIC:
+                       We compare starting from the second byte (index 1).
+                       This allows us to find the function regardless of whether 
+                       the first byte is currently 0x55 (Original) or 0xC3 (Patched).
+                    */
+                    if (memcmp(&buf[i + 1], &signature[1], sizeof(signature) - 1) == 0) {
+                        
+                        // Final Safety Check: Verify the head byte is one of our two known states
+                        if (buf[i] == 0x55 || buf[i] == 0xC3) {
+                            uint64_t found_addr = address + i;
+                            free(buf);
+                            return found_addr; // Target confirmed
+                        }
+                    }
+                }
+            }
+            free(buf);
+        }
+        // Move to the next memory region
+        address += size;
+    }
+    
+    return 0; // Signature not found in any executable region
+}
+
+int main(int argc, char **argv) {
+    int revert = (argc > 1 && strcmp(argv[1], "--revert") == 0);
+    
+    pid_t pid = -1;
+    int proc_count = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
+    pid_t pids[proc_count];
+    proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
+    for (int i = 0; i < proc_count; i++) {
+        char name[1024];
+        if (proc_name(pids[i], name, sizeof(name)) > 0 && strcmp(name, "loginwindow") == 0) {
+            pid = pids[i];
+            break;
+        }
+    }
+
+    if (pid == -1) {
+        log_status("ERROR: loginwindow not found.", 0);
+        return 1;
+    }
+
+    task_t task;
+    if (task_for_pid(mach_task_self(), pid, &task) != KERN_SUCCESS) {
+        log_status("ERROR: Task port failed.", 0);
+        return 1;
+    }
+
+    uint64_t base_addr;
+    uint64_t target_addr = find_offset(task, &base_addr);
+
+    if (target_addr == 0) {
+        log_status("ERROR: Signature not found.", 0);
+        return 1;
+    }
+
+    uint64_t offset = target_addr - base_addr;
+    uint8_t byte = revert ? 0x55 : 0xC3;
+    
+    mach_vm_protect(task, target_addr, 1, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (mach_vm_write(task, target_addr, (pointer_t)&byte, 1) == KERN_SUCCESS) {
+        char log_msg[64];
+        snprintf(log_msg, sizeof(log_msg), "SUCCESS: %s applied", revert ? "Revert" : "Patch");
+        log_status(log_msg, offset);
+    }
+    mach_vm_protect(task, target_addr, 1, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+
+    return 0;
+}
